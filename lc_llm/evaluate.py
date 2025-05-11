@@ -120,7 +120,18 @@ def main():
         model_path = MODEL_NAME
 
     logger.info(f"Loading model from: {model_path}")
-    model, tokenizer = load_model_and_tokenizer()
+    if USE_LORA and os.path.exists(model_path) and model_path != MODEL_NAME:
+        # Load base model
+        model, tokenizer = load_model_and_tokenizer()
+
+        # Load LoRA adapter
+        from peft import PeftModel
+        model = PeftModel.from_pretrained(model, model_path)
+        logger.info(f"Loaded LoRA adapter from {model_path}")
+    else:
+        # Load model and tokenizer normally
+        model, tokenizer = load_model_and_tokenizer()
+
     model = model.to(device)
 
     # Load data

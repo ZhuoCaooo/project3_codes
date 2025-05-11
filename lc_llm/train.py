@@ -29,9 +29,13 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
 
-    # Load model and tokenizer
+    # Load model and tokenizer with LoRA if enabled
     logger.info(f"Loading model: {MODEL_NAME}")
     model, tokenizer = load_model_and_tokenizer()
+
+    if USE_LORA:
+        logger.info(f"Using LoRA with rank={LORA_RANK}, alpha={LORA_ALPHA}")
+
     model = model.to(device)
 
     # Load data

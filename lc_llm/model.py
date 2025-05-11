@@ -6,10 +6,12 @@ from tqdm import tqdm
 import numpy as np
 import os
 from config import *
+# Add PEFT imports
+from peft import prepare_model_for_kbit_training, LoraConfig, get_peft_model, TaskType
 
 
 def load_model_and_tokenizer():
-    """Load the Phi-2 model and tokenizer from Hugging Face."""
+    """Load the Phi-2 model and tokenizer from Hugging Face with LoRA."""
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
     # Fix for padding token error
@@ -22,6 +24,22 @@ def load_model_and_tokenizer():
 
     # Enable gradient checkpointing to save memory
     model.gradient_checkpointing_enable()
+
+    # Apply LoRA if enabled
+    if USE_LORA:
+        # Configure LoRA
+        lora_config = LoraConfig(
+            r=LORA_RANK,
+            lora_alpha=LORA_ALPHA,
+            target_modules=TARGET_MODULES,
+            lora_dropout=LORA_DROPOUT,
+            bias=LORA_BIAS,
+            task_type=TaskType.CAUSAL_LM
+        )
+
+        # Prepare model for LoRA fine-tuning
+        model = get_peft_model(model, lora_config)
+        model.print_trainable_parameters()  # Print parameter info
 
     return model, tokenizer
 
@@ -151,6 +169,16 @@ def evaluate(model, eval_loader, tokenizer, device):
 def save_model(model, tokenizer, output_dir):
     """Save the model and tokenizer."""
     os.makedirs(output_dir, exist_ok=True)
-    model.save_pretrained(output_dir)
-    tokenizer.save_pretrained(output_dir)
-    print(f"Model saved to {output_dir}")
+
+    # For LoRA models, we need to save the adapter separately
+    if hasattr(model, "save_pretrained") and USE_LORA:
+        # Save the adapter
+        model.save_pretrained(output_dir)
+        # Save the tokenizer
+        tokenizer.save_pretrained(output_dir)
+        print(f"LoRA adapter saved to {output_dir}")
+    else:
+        # Standard save for full models
+        model.save_pretrained(output_dir)
+        tokenizer.save_pretrained(output_dir)
+        print(f"Model saved to {output_dir}")
