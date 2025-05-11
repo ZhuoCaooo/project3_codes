@@ -1,0 +1,8 @@
+# Exclude large data directories
+/data/
+/output_8sbefore_2safter/
+/training_data_analyze_results/
+/lc_llm/outputs/
+/venv/
+/__pycache__/
+/.idea/
