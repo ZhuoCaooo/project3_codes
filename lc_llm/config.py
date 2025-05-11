@@ -39,3 +39,10 @@ Output:
   - Trajectory (MOST IMPORTANT): 4 points, one every 1 second
     - [(x1,y1), (x2,y2), (x3,y3), (x4,y4)]
 """
+# LoRA configuration
+USE_LORA = True
+LORA_RANK = 64  # As specified in the LC-LLM paper
+LORA_ALPHA = 16  # As specified in the LC-LLM paper
+LORA_DROPOUT = 0.1
+TARGET_MODULES = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+LORA_BIAS = "none"  # Can be "none", "all" or "lora_only"
