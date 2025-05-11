@@ -7,7 +7,7 @@ import numpy as np
 import os
 from config import *
 # Add PEFT imports
-from peft import prepare_model_for_kbit_training, LoraConfig, get_peft_model, TaskType
+from peft import LoraConfig, get_peft_model, TaskType
 
 
 def load_model_and_tokenizer():
@@ -16,17 +16,19 @@ def load_model_and_tokenizer():
 
     # Fix for padding token error
     if tokenizer.pad_token is None:
-        # Set pad_token to eos_token for Phi-2
         tokenizer.pad_token = tokenizer.eos_token
         print(f"Set padding token to: {tokenizer.pad_token}")
 
-    model = AutoModelForCausalLM.from_pretrained(MODEL_NAME)
+    # Load the base model without gradient checkpointing
+    print("Loading base model...")
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_NAME,
+        torch_dtype=torch.float16,  # Use fp16 precision to save memory
+    )
 
-    # Enable gradient checkpointing to save memory
-    model.gradient_checkpointing_enable()
-
-    # Apply LoRA if enabled
+    # Apply LoRA
     if USE_LORA:
+        print("Setting up LoRA configuration...")
         # Configure LoRA
         lora_config = LoraConfig(
             r=LORA_RANK,
@@ -37,42 +39,74 @@ def load_model_and_tokenizer():
             task_type=TaskType.CAUSAL_LM
         )
 
-        # Prepare model for LoRA fine-tuning
+        print("Applying LoRA to model...")
+        # Apply LoRA to model
         model = get_peft_model(model, lora_config)
-        model.print_trainable_parameters()  # Print parameter info
+
+        # Make sure we're explicitly enabling training mode
+        model.train()
+
+        # Print trainable parameters
+        model.print_trainable_parameters()
 
     return model, tokenizer
 
 
 def train_epoch(model, train_loader, optimizer, scheduler, device):
     """Train the model for one epoch."""
-    model.train()
+    model.train()  # Ensure model is in training mode
     total_loss = 0
 
     progress_bar = tqdm(train_loader, desc="Training")
-    for batch in progress_bar:
+    for idx, batch in enumerate(progress_bar):
         # Move batch to device
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
         labels = batch["labels"].to(device)
 
+        # Clear gradients
+        optimizer.zero_grad()
+
         # Forward pass
-        outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+        outputs = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=labels,
+        )
+
+        # Get loss
         loss = outputs.loss
 
-        # Backward pass with gradient accumulation
-        loss = loss / GRADIENT_ACCUMULATION_STEPS
+        # Print debugging info for first batch
+        if idx == 0:
+            print(f"Loss on first batch: {loss.item()}")
+            print(f"Loss requires grad: {loss.requires_grad}")
+            # Check if model has trainable parameters
+            has_trainable = False
+            for name, param in model.named_parameters():
+                if param.requires_grad:
+                    has_trainable = True
+                    print(f"Trainable parameter: {name}, shape: {param.shape}")
+                    break
+            if not has_trainable:
+                print("WARNING: No trainable parameters found!")
+
+        # Handle gradient accumulation
+        if GRADIENT_ACCUMULATION_STEPS > 1:
+            loss = loss / GRADIENT_ACCUMULATION_STEPS
+
+        # Backward pass
         loss.backward()
 
-        if (progress_bar.n + 1) % GRADIENT_ACCUMULATION_STEPS == 0 or progress_bar.n == len(train_loader) - 1:
-            # Update weights
+        # Update weights if needed
+        if (idx + 1) % GRADIENT_ACCUMULATION_STEPS == 0 or idx == len(train_loader) - 1:
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad()
 
         # Update progress bar
-        total_loss += loss.item() * GRADIENT_ACCUMULATION_STEPS
-        progress_bar.set_postfix({"loss": total_loss / (progress_bar.n + 1)})
+        total_loss += loss.item() * (1 if GRADIENT_ACCUMULATION_STEPS <= 1 else GRADIENT_ACCUMULATION_STEPS)
+        progress_bar.set_postfix({"loss": total_loss / (idx + 1)})
 
     return total_loss / len(train_loader)
 

@@ -3,11 +3,11 @@
 # Model configuration
 MODEL_NAME = "microsoft/phi-2"
 MAX_LENGTH = 2048
-BATCH_SIZE = 4  # Adjust based on your GPU memory
+BATCH_SIZE = 2  # Adjust based on your GPU memory
 LEARNING_RATE = 5e-5
 NUM_EPOCHS = 3
 WARMUP_STEPS = 100
-GRADIENT_ACCUMULATION_STEPS = 4
+GRADIENT_ACCUMULATION_STEPS = 8
 WEIGHT_DECAY = 0.01
 
 # Data configuration

@@ -29,14 +29,13 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
 
-    # Load model and tokenizer with LoRA if enabled
+    # Load model and tokenizer
     logger.info(f"Loading model: {MODEL_NAME}")
     model, tokenizer = load_model_and_tokenizer()
+    model = model.to(device)
 
     if USE_LORA:
         logger.info(f"Using LoRA with rank={LORA_RANK}, alpha={LORA_ALPHA}")
-
-    model = model.to(device)
 
     # Load data
     logger.info(f"Loading data from: {DATA_DIR}")
@@ -47,7 +46,15 @@ def main():
     train_loader, val_loader, test_loader = create_dataloaders(train_data, val_data, test_data, tokenizer)
 
     # Setup optimizer and scheduler
-    optimizer = AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    # Only optimize trainable parameters to save memory
+    optimizer_grouped_parameters = [
+        {
+            "params": [p for n, p in model.named_parameters() if p.requires_grad],
+            "weight_decay": WEIGHT_DECAY,
+        }
+    ]
+
+    optimizer = AdamW(optimizer_grouped_parameters, lr=LEARNING_RATE)
     total_steps = len(train_loader) * NUM_EPOCHS
     scheduler = get_linear_schedule_with_warmup(
         optimizer, num_warmup_steps=WARMUP_STEPS, num_training_steps=total_steps
