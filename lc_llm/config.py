@@ -11,14 +11,14 @@ GRADIENT_ACCUMULATION_STEPS = 16
 WEIGHT_DECAY = 0.01
 
 # Data configuration
-DATA_DIR = "../output_8sbefore_2safter/"
+DATA_DIR = "/scratch/user/uqzcao2/lane_change_pal/data/output_8sbefore_2safter/"
 TRAIN_RATIO = 0.8
 VAL_RATIO = 0.1
 TEST_RATIO = 0.1
 MAX_SAMPLES = None  # Set to a small number for testing, None for full dataset
 
 # Output configuration
-OUTPUT_DIR = "./outputs/lc_llm_baseline/"
+OUTPUT_DIR = "/scratch/user/uqzcao2/lane_change_pal/outputs/lc_llm_baseline/"
 SAVE_STEPS = 500
 EVAL_STEPS = 100
 
