@@ -15,7 +15,7 @@ DATA_DIR = "../output_8sbefore_2safter/"
 TRAIN_RATIO = 0.8
 VAL_RATIO = 0.1
 TEST_RATIO = 0.1
-MAX_SAMPLES = None  # Set to a small number for testing, None for full dataset
+MAX_SAMPLES = 200  # Set to a small number for testing, None for full dataset
 
 # Output configuration
 OUTPUT_DIR = "./lc_llm/outputs/"

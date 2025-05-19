@@ -100,8 +100,7 @@ def create_surrounding_vehicle_info(features):
 
 def create_prompt(current_frame, history_frames, intention, future_frames):
     """Create a prompt for the LC-LLM model based on the features."""
-
-    # Generate lane description
+    # Generate lane description and user message as before
     lane_position = get_lane_description(current_frame)
     lane_count = 1
     if current_frame[0] > 0.5:  # Left lane exists
@@ -109,7 +108,6 @@ def create_prompt(current_frame, history_frames, intention, future_frames):
     if current_frame[1] > 0.5:  # Right lane exists
         lane_count += 1
 
-    # Create user message
     user_message = f"""The target vehicle is driving on a {lane_count}-lane highway, located at the {lane_position} lane.
 The information of target vehicle is as follow:
 - Velocity(km/h): vx={current_frame[5]:.2f}, vy={current_frame[3]:.2f}
@@ -120,37 +118,104 @@ The information of its surrounding vehicles (with a range of 200m) are listed as
 {create_surrounding_vehicle_info(current_frame)}
 """
 
-    # For training, we need to include the ground truth output
     # Format the future trajectory
     future_positions = []
     for i, frame in enumerate(future_frames):
-        # Use delta_y and y_velocity as the trajectory coordinates
-        # In the actual implementation you might want to use real positions
         future_positions.append(f"({(i + 1) * 25:.2f},{frame[2]:.2f})")
-
     trajectory_str = ", ".join(future_positions)
 
     # Map intention to text
     intention_map = {0: "0: Keep lane", 1: "1: Left lane change", 2: "2: Right lane change"}
+    try:
+        # Ensure intention is a valid integer
+        intention = int(intention)
+        if intention not in [0, 1, 2]:
+            print(f"Warning: Invalid intention value: {intention}, defaulting to 0")
+            intention = 0
+    except Exception as e:
+        print(f"Warning: Failed to interpret intention: {e}, defaulting to 0")
+        intention = 0
+
     intention_text = intention_map[intention]
 
-    # Include Chain-of-Thought reasoning (this is simplified and would be more elaborate in real implementation)
-    cot_reasoning = ""
-    if intention == 0:
-        cot_reasoning = """Thought:
-- Notable feature: Ahead is free.
-- Notable feature: The speed of surrounding vehicles is similar to the target vehicle's.
-- Potential behavior: Normal Keep lane."""
-    elif intention == 1:
-        cot_reasoning = """Thought:
-- Notable feature: The speed of the ahead vehicle is slower than that of the target's.
-- Notable feature: Left front is free.
-- Potential behavior: Change to the left lane for overtaking."""
-    else:  # intention == 2
-        cot_reasoning = """Thought:
-- Notable feature: The speed of the ahead vehicle is slower than that of the target's.
-- Notable feature: Right front is free.
-- Potential behavior: Change to the right lane for overtaking."""
+    # Enhanced thought generation based on actual vehicle data
+    notable_features = []
+
+    # 1. Check for significant lateral movement
+    if abs(current_frame[3]) > 1.5:  # Y_Velocity > 1.5 km/h
+        notable_features.append(
+            f"Notable feature: Significant lateral movement detected (vy={current_frame[3]:.2f} km/h).")
+
+    # 2. Check for significant acceleration
+    if abs(current_frame[6]) > 0.4:  # X_Acceleration > 0.4 m/s²
+        notable_features.append(f"Notable feature: High acceleration/deceleration (ax={current_frame[6]:.2f} m/s²).")
+
+    # 3. Vehicle ahead status
+    target_speed = current_frame[5]  # X_Velocity of target vehicle
+    if current_frame[8] < 200:  # Preceding vehicle within range
+        # Use a lower speed threshold to determine if ahead is blocked
+        if target_speed > current_frame[5] - 5:  # Target is faster than the vehicle ahead
+            notable_features.append(
+                "Notable feature: The speed of the ahead vehicle is slower than that of the target's, Ahead is block.")
+            if get_vehicle_type(current_frame) == "Truck" and current_frame[8] < 100:
+                notable_features.append("Notable feature: The type of ahead vehicle is Truck.")
+
+    # 4. Left front status
+    if current_frame[10] < 200:  # Left preceding vehicle within range
+        if target_speed < current_frame[5]:
+            notable_features.append("Notable feature: Left front is free.")
+        else:
+            notable_features.append("Notable feature: Left front is block.")
+
+    # 5. Right front status
+    if current_frame[13] < 200:  # Right preceding vehicle within range
+        if target_speed < current_frame[5]:
+            notable_features.append("Notable feature: Right front is free.")
+        else:
+            notable_features.append(
+                "Notable feature: The speed of the right front vehicle is slower than that of the target's.")
+
+    # If no notable features were detected, add a default one based on intention
+    if not notable_features:
+        if intention == 0:
+            notable_features.append("Notable feature: Ahead is free.")
+            notable_features.append(
+                "Notable feature: The speed of surrounding vehicles is similar to the target vehicle's.")
+        elif intention == 1:
+            notable_features.append("Notable feature: Left front is free.")
+        else:  # intention == 2
+            notable_features.append("Notable feature: Right front is free.")
+
+    # Determine potential behavior based on intention and vehicle state
+    potential_behavior = ""
+    if intention == 0:  # Keep lane
+        if current_frame[8] < 50:  # Close to preceding vehicle
+            potential_behavior = "Following and Keep lane."
+        else:
+            potential_behavior = "Normal Keep lane."
+    elif intention == 1:  # Left lane change
+        if lane_position == "rightmost" or lane_position == "middle":
+            if current_frame[8] < 100 and target_speed > current_frame[5]:  # Vehicle ahead is slower
+                potential_behavior = "Change to the left lane for overtaking."
+            elif current_frame[6] > 0.5:  # High acceleration
+                potential_behavior = "Change left to the fast lane."
+            else:
+                potential_behavior = "Irregular left lane change."
+        else:
+            potential_behavior = "Irregular left lane change."
+    else:  # intention == 2, Right lane change
+        if lane_position == "leftmost" or lane_position == "middle":
+            if current_frame[8] < 100 and target_speed > current_frame[5]:  # Vehicle ahead is slower
+                potential_behavior = "Change to the right lane for overtaking."
+            elif current_frame[6] < -0.5 or get_vehicle_type(current_frame) == "Truck":  # Deceleration or truck
+                potential_behavior = "Change right to the slow lane."
+            else:
+                potential_behavior = "Irregular right lane change."
+        else:
+            potential_behavior = "Irregular right lane change."
+
+    # Always include the Thought: marker and compile the reasoning
+    cot_reasoning = "Thought:\n- " + "\n- ".join(notable_features) + f"\n- Potential behavior: {potential_behavior}"
 
     # Compose the complete model output
     model_output = f"""{cot_reasoning}
@@ -161,5 +226,9 @@ Final Answer:
 
     # Combine system message, user message, and model output
     full_prompt = f"{SYSTEM_MESSAGE}\n{user_message}\n{model_output}"
+
+    # Debug print to ensure the marker exists
+    if "Thought:" not in full_prompt:
+        print("WARNING: 'Thought:' marker missing from prompt!")
 
     return full_prompt
