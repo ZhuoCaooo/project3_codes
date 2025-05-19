@@ -1,3 +1,4 @@
+import config
 import sys
 print("Python path at start of model.py:", sys.path)
 
@@ -15,34 +16,39 @@ from peft import LoraConfig, get_peft_model, TaskType
 
 
 def load_model_and_tokenizer():
-    print(f"Transformers version: {transformers.__version__}")
-    print("Python path inside load_model_and_tokenizer():", sys.path)
+    """Load the Phi-2 model and tokenizer from Hugging Face with LoRA."""
     print(f"Transformers version: {transformers.__version__}")
     
-    try:
-        # First try to load the config to see if that works
-        print("Attempting to load Phi-2 config...")
-        from transformers import AutoConfig
-        config = AutoConfig.from_pretrained(MODEL_NAME, trust_remote_code=True)
-        print(f"Config loaded successfully. Model type: {config.model_type}")
-    except Exception as e:
-        print(f"Error loading config: {str(e)}")
-        
-    """Load the Phi-2 model and tokenizer from Hugging Face with LoRA."""
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
     # Fix for padding token error
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
         print(f"Set padding token to: {tokenizer.pad_token}")
+    
+    # Determine precision based on config
+    dtype = torch.float16 if USE_FP16 else torch.float32
+    print(f"Using model precision: {dtype}")
 
-    # Load the base model without gradient checkpointing
+    # Load the base model with memory optimizations
     print("Loading base model...")
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_NAME,
-        torch_dtype=torch.float16,  # Use fp16 precision to save memory
-        trust_remote_code=True  # NEW: Add this parameter
+        torch_dtype=dtype,
+        low_cpu_mem_usage=True,
+        trust_remote_code=True
     )
+    
+    # Apply memory optimizations
+    if USE_GRADIENT_CHECKPOINTING:
+        print("Enabling gradient checkpointing...")
+        model.gradient_checkpointing_enable()
+    
+    if USE_MEMORY_EFFICIENT_ATTENTION:
+        print("Enabling memory efficient attention...")
+        if hasattr(model.config, "use_cache"):
+            model.config.use_cache = False
+            print("Disabled model KV-cache")
 
     # Apply LoRA
     if USE_LORA:
@@ -61,11 +67,11 @@ def load_model_and_tokenizer():
         # Apply LoRA to model
         model = get_peft_model(model, lora_config)
 
-        # Make sure we're explicitly enabling training mode
-        model.train()
-
-        # Print trainable parameters
-        model.print_trainable_parameters()
+    # Print trainable vs non-trainable parameters
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Total parameters: {total_params:,}")
+    print(f"Trainable parameters: {trainable_params:,} ({trainable_params/total_params:.2%})")
 
     return model, tokenizer
 
@@ -74,7 +80,15 @@ def train_epoch(model, train_loader, optimizer, scheduler, device):
     """Train the model for one epoch."""
     model.train()  # Ensure model is in training mode
     total_loss = 0
-
+    
+    # Import custom loss
+    import importlib
+    import sys
+    # Ensure custom_loss is reloaded
+    if 'custom_loss' in sys.modules:
+        del sys.modules['custom_loss']
+    from custom_loss import stable_cross_entropy_loss
+    
     progress_bar = tqdm(train_loader, desc="Training")
     for idx, batch in enumerate(progress_bar):
         # Move batch to device
@@ -85,29 +99,61 @@ def train_epoch(model, train_loader, optimizer, scheduler, device):
         # Clear gradients
         optimizer.zero_grad()
 
-        # Forward pass
-        outputs = model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            labels=labels,
-        )
+        # Try using the model's built-in loss calculation first
+        try:
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels,
+            )
+            loss = outputs.loss
+            
+            # If loss is NaN, use custom loss
+            if torch.isnan(loss).any():
+                print("NaN loss detected, switching to custom loss function")
+                outputs = model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                )
+                logits = outputs.logits
+                loss = stable_cross_entropy_loss(
+                    logits.view(-1, logits.size(-1)),
+                    labels.view(-1),
+                    ignore_index=-100,
+                    label_smoothing=0.1,
+                    scaling=0.5
+                )
+        except Exception as e:
+            print(f"Error in forward pass: {str(e)}")
+            print("Using custom loss function")
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+            )
+            logits = outputs.logits
+            loss = stable_cross_entropy_loss(
+                logits.view(-1, logits.size(-1)),
+                labels.view(-1),
+                ignore_index=-100,
+                label_smoothing=0.1,
+                scaling=0.5
+            )
 
-        # Get loss
-        loss = outputs.loss
-
-        # Print debugging info for first batch
-        if idx == 0:
-            print(f"Loss on first batch: {loss.item()}")
+        # Print debugging info for first batch and periodically
+        if idx == 0 or idx % 100 == 0:
+            print(f"Batch {idx}, Loss: {loss.item()}")
             print(f"Loss requires grad: {loss.requires_grad}")
+            
             # Check if model has trainable parameters
-            has_trainable = False
-            for name, param in model.named_parameters():
-                if param.requires_grad:
-                    has_trainable = True
-                    print(f"Trainable parameter: {name}, shape: {param.shape}")
-                    break
-            if not has_trainable:
-                print("WARNING: No trainable parameters found!")
+            if idx == 0:
+                has_trainable = False
+                for name, param in model.named_parameters():
+                    if param.requires_grad:
+                        has_trainable = True
+                        print(f"Trainable parameter: {name}, shape: {param.shape}")
+                        break
+                if not has_trainable:
+                    print("WARNING: No trainable parameters found!")
 
         # Handle gradient accumulation
         if GRADIENT_ACCUMULATION_STEPS > 1:
@@ -115,6 +161,30 @@ def train_epoch(model, train_loader, optimizer, scheduler, device):
 
         # Backward pass
         loss.backward()
+        
+        has_nan_grad = False
+        for name, param in model.named_parameters():
+            if param.requires_grad and param.grad is not None:
+                if torch.isnan(param.grad).any():
+                    print(f"NaN gradient detected in {name}")
+                    has_nan_grad = True
+                    break
+
+        if has_nan_grad:
+            print("Skipping optimizer step due to NaN gradient")
+            continue
+        
+        if GRADIENT_CLIP_NORM > 0:
+            torch.nn.utils.clip_grad_norm_(
+                [p for p in model.parameters() if p.requires_grad], 
+                GRADIENT_CLIP_NORM
+            )
+            
+        # Add value clipping in addition to norm clipping
+        if hasattr(config, 'CLIP_GRAD_VALUE') and config.CLIP_GRAD_VALUE > 0:
+            for p in model.parameters():
+                if p.requires_grad and p.grad is not None:
+                    p.grad.data.clamp_(-config.CLIP_GRAD_VALUE, config.CLIP_GRAD_VALUE)
 
         # Update weights if needed
         if (idx + 1) % GRADIENT_ACCUMULATION_STEPS == 0 or idx == len(train_loader) - 1:
@@ -129,6 +199,8 @@ def train_epoch(model, train_loader, optimizer, scheduler, device):
     return total_loss / len(train_loader)
 
 
+
+
 def evaluate(model, eval_loader, tokenizer, device):
     """Evaluate the model on validation or test data."""
     model.eval()
@@ -140,6 +212,10 @@ def evaluate(model, eval_loader, tokenizer, device):
 
     # Metrics for trajectory prediction
     trajectory_mse = 0
+    
+    # Print memory usage at start
+    if torch.cuda.is_available():
+        print(f"GPU memory before evaluation: {torch.cuda.memory_allocated()/1e9:.2f}GB")
 
     with torch.no_grad():
         for batch in tqdm(eval_loader, desc="Evaluating"):
@@ -158,12 +234,18 @@ def evaluate(model, eval_loader, tokenizer, device):
             total_loss += loss.item()
 
             # Generate complete output for intention and trajectory extraction
+            # Use reduced max_new_tokens to save memory
             generated = model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                max_new_tokens=200,
-                pad_token_id=tokenizer.eos_token_id
+                max_new_tokens=MAX_NEW_TOKENS_GENERATION,  # Use the config value
+                pad_token_id=tokenizer.eos_token_id,
+                do_sample=False  # Use greedy decoding to save memory
             )
+
+            # Clear CUDA cache after generation
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
             # Extract intention and trajectory from generated text
             for i in range(len(generated)):
