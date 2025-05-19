@@ -3,8 +3,8 @@
 # Model configuration
 MODEL_NAME = "microsoft/phi-2"
 MAX_LENGTH = 128
-BATCH_SIZE = 1  # Adjust based on your GPU memory
-LEARNING_RATE = 5e-5
+BATCH_SIZE = 2  # Adjust based on your GPU memory
+LEARNING_RATE = 2e-5
 NUM_EPOCHS = 3
 WARMUP_STEPS = 100
 GRADIENT_ACCUMULATION_STEPS = 16
@@ -41,8 +41,8 @@ Output:
 """
 # LoRA configuration
 USE_LORA = True
-LORA_RANK = 16  # As specified in the LC-LLM paper
-LORA_ALPHA = 32  # As specified in the LC-LLM paper
+LORA_RANK = 8  # As specified in the LC-LLM paper
+LORA_ALPHA = 16  # As specified in the LC-LLM paper
 LORA_DROPOUT = 0.05
 TARGET_MODULES = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 LORA_BIAS = "none"  # Can be "none", "all" or "lora_only"

@@ -75,6 +75,14 @@ def train_epoch(model, train_loader, optimizer, scheduler, device):
     model.train()  # Ensure model is in training mode
     total_loss = 0
 
+    # Import custom loss function
+    import importlib
+    import sys
+    # Force reload custom_loss module
+    if 'custom_loss' in sys.modules:
+        del sys.modules['custom_loss']
+    from custom_loss import stable_cross_entropy_loss
+
     progress_bar = tqdm(train_loader, desc="Training")
     for idx, batch in enumerate(progress_bar):
         # Move batch to device
@@ -82,18 +90,54 @@ def train_epoch(model, train_loader, optimizer, scheduler, device):
         attention_mask = batch["attention_mask"].to(device)
         labels = batch["labels"].to(device)
 
+        # Print diagnostics for the first few batches
+        if idx < 3:
+            valid_count = (labels != -100).sum().item()
+            total_count = labels.numel()
+            print(f"Batch {idx}: {valid_count}/{total_count} valid labels ({valid_count / total_count:.2%})")
+
         # Clear gradients
         optimizer.zero_grad()
 
-        # Forward pass
-        outputs = model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            labels=labels,
-        )
+        # Try standard loss first
+        try:
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels,
+            )
+            loss = outputs.loss
 
-        # Get loss
-        loss = outputs.loss
+            # If loss is 0 or NaN, use custom loss
+            if loss.item() == 0 or torch.isnan(loss).any():
+                print(f"Zero or NaN loss detected, switching to custom loss function")
+                outputs = model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                )
+                logits = outputs.logits
+                loss = stable_cross_entropy_loss(
+                    logits.view(-1, logits.size(-1)),
+                    labels.view(-1),
+                    ignore_index=-100,
+                    label_smoothing=0.1,
+                    scaling=1.0
+                )
+        except Exception as e:
+            print(f"Error in forward pass: {str(e)}")
+            print("Using custom loss function")
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+            )
+            logits = outputs.logits
+            loss = stable_cross_entropy_loss(
+                logits.view(-1, logits.size(-1)),
+                labels.view(-1),
+                ignore_index=-100,
+                label_smoothing=0.1,
+                scaling=1.0
+            )
 
         # Print debugging info for first batch
         if idx == 0:
