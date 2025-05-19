@@ -11,7 +11,7 @@ GRADIENT_ACCUMULATION_STEPS = 16
 WEIGHT_DECAY = 0.01
 
 # Data configuration
-DATA_DIR = "/scratch/user/uqzcao2/lane_change_pal/data/output_8sbefore_2safter/"
+DATA_DIR = "xxxxx"
 TRAIN_RATIO = 0.8
 VAL_RATIO = 0.1
 TEST_RATIO = 0.1
