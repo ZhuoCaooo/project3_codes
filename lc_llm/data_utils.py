@@ -46,26 +46,48 @@ class LaneChangeDataset(Dataset):
         # Create prompt for this sample
         prompt = prompt_utils.create_prompt(current_frame, history_frames, intention, future_frames)
 
-        # Tokenize the prompt
+        # After tokenizing the prompt:
         tokenized_prompt = self.tokenizer(prompt, padding="max_length", truncation=True,
                                           max_length=MAX_LENGTH, return_tensors="pt")
 
-        # Create input_ids and labels for causal language modeling
         input_ids = tokenized_prompt["input_ids"][0]
         attention_mask = tokenized_prompt["attention_mask"][0]
 
-        # Find the position where the system message ends and the model output begins
-        system_msg_end = prompt.find("Thought:")
-        if system_msg_end == -1:
-            system_msg_end = len(prompt)
+        # REPLACE the existing label creation code with this improved version:
+        # Find output section more reliably
+        output_marker = "Thought:"
+        output_start = prompt.find(output_marker)
 
-        # Create labels: -100 for system message (we don't compute loss on it)
-        # and actual token ids for the output tokens
-        encoded_system_msg = self.tokenizer(prompt[:system_msg_end], return_tensors="pt")["input_ids"][0]
-        system_msg_token_count = len(encoded_system_msg)
+        # Fallback options if Thought: is not found
+        if output_start == -1:
+            output_marker = "Final Answer:"
+            output_start = prompt.find(output_marker)
 
+        # Final fallback - use a percentage split
+        if output_start == -1:
+            # Split at 70% of the prompt
+            output_start = int(len(prompt) * 0.7)
+            print(f"Warning: Couldn't find output markers in sample {idx}, using 70/30 split")
+
+        # Tokenize just the part before the output section
+        input_text = prompt[:output_start]
+        input_tokens = self.tokenizer(input_text, return_tensors="pt")["input_ids"][0]
+        input_token_count = len(input_tokens)
+
+        # Safety check to avoid index errors
+        input_token_count = min(input_token_count, len(input_ids))
+
+        # Create labels: -100 for input portion, actual ids for output portion
         labels = input_ids.clone()
-        labels[:system_msg_token_count] = -100  # Don't compute loss on system message
+        labels[:input_token_count] = -100
+
+        # Diagnostic check - ensure we have some valid labels
+        valid_label_count = (labels != -100).sum().item()
+        if valid_label_count == 0:
+            print(f"Warning: Sample {idx} has ZERO valid labels! Using 30% fallback.")
+            # Emergency fix: Use the last 30% of tokens for training
+            fallback_split = int(len(labels) * 0.7)
+            labels[fallback_split:] = input_ids[fallback_split:].clone()
 
         return {
             "input_ids": input_ids,
@@ -73,7 +95,6 @@ class LaneChangeDataset(Dataset):
             "labels": labels,
             "intention": intention,
             "future_trajectory": np.array([(frame[2], frame[3]) for frame in future_frames])
-            # (delta_y, y_velocity) as trajectory
         }
 
 
