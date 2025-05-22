@@ -7,3 +7,4 @@
 /__pycache__/
 /.idea/
 *.json
+convert_to_phi2.py
