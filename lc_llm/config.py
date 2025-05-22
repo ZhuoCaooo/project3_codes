@@ -1,6 +1,6 @@
 # Model configuration (matching paper as closely as possible)
 MODEL_NAME = "microsoft/phi-2"  # Using Phi-2 instead of Llama-2-13B for simplicity
-MAX_LENGTH = 516  # Paper uses 2048 (CRITICAL: was 128 before!)
+MAX_LENGTH = 512  # Paper uses 2048 (CRITICAL: was 128 before!)
 BATCH_SIZE = 4  # Paper uses 8
 LEARNING_RATE = 5e-4  # Paper uses 5e-4 (higher than your 2e-5)
 NUM_EPOCHS = 2  # Paper uses 2 epochs
