@@ -10,9 +10,9 @@ WEIGHT_DECAY = 0.01
 
 # Data configuration
 # Dataset paths - UPDATE THESE LINES
-TRAIN_FILE = "../phi2_training_data.json"  # Changed from lcllm_training_data.json
-TEST_FILE = "../phi2_testing_data.json"    # Changed from lcllm_testing_data.json
-DATA_FILE = "../phi2_training_data.json"  # Changed from lcllm_training_data.json
+TRAIN_FILE = "../data/phi2_training_data.json"
+TEST_FILE = "../data/phi2_testing_data.json"    
+DATA_FILE = "../data/phi2_training_data.json"
 TRAIN_RATIO = 0.8
 VAL_RATIO = 0.1
 TEST_RATIO = 0.1
