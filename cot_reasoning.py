@@ -322,7 +322,7 @@ def main():
     pickle_files = glob.glob("output_8sbefore_2safter/*.pickle")
     all_samples = []
 
-    for file_path in pickle_files[:45]:  # Process first 3 files
+    for file_path in pickle_files[45:61]:  # Process first 3 files
         print(f"Processing {file_path}...")
 
         with open(file_path, 'rb') as f:
@@ -342,7 +342,7 @@ def main():
         print(f"Converted {len(data)} samples from {file_path}")
 
     # Save result
-    with open("lcllm_training_data.json", 'w') as f:
+    with open("lcllm_testing_data.json", 'w') as f:
         json.dump(all_samples, f, indent=2)
 
     print(f"Saved {len(all_samples)} samples to lcllm_training_data.json")
