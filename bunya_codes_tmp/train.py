@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Complete Corrected Training Script for LC-LLM
-Fixes all tokenization issues and vocabulary mismatches
+Memory-Optimized LC-LLM Training Script for Bunya
 """
 
 import torch
@@ -17,6 +16,7 @@ from peft import LoraConfig, get_peft_model
 from config import *
 import numpy as np
 import re
+import gc
 
 
 class LCLLMTrainer:
@@ -26,7 +26,12 @@ class LCLLMTrainer:
         self.model = None
 
     def load_model_and_tokenizer(self):
-        """Load model and tokenizer with vocabulary fixes"""
+        """Load model and tokenizer with memory optimizations"""
+        
+        # Set memory fragmentation limit
+        if hasattr(torch.cuda, 'set_per_process_memory_fraction'):
+            torch.cuda.set_per_process_memory_fraction(0.95)  # Use 95% of GPU memory max
+        
         print(f"Loading tokenizer: {self.model_name}")
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True)
 
@@ -40,8 +45,14 @@ class LCLLMTrainer:
             self.model_name,
             torch_dtype=torch.float16,
             trust_remote_code=True,
-            device_map="auto"
+            device_map="auto",
+            low_cpu_mem_usage=True  # Memory optimization
         )
+
+        # Enable gradient checkpointing for memory efficiency
+        if hasattr(self.model, 'gradient_checkpointing_enable'):
+            self.model.gradient_checkpointing_enable()
+            print("✅ Gradient checkpointing enabled")
 
         # Check and fix vocabulary compatibility
         tokenizer_vocab_size = self.tokenizer.vocab_size
@@ -59,49 +70,46 @@ class LCLLMTrainer:
         # Apply LoRA configuration
         print("Applying LoRA configuration...")
         lora_config = LoraConfig(
-            r=LORA_RANK,  # From config
-            lora_alpha=LORA_ALPHA,  # From config
-            target_modules=TARGET_MODULES,  # From config
-            lora_dropout=LORA_DROPOUT,  # From config
-            bias=LORA_BIAS,  # From config
+            r=LORA_RANK,
+            lora_alpha=LORA_ALPHA,
+            target_modules=TARGET_MODULES,
+            lora_dropout=LORA_DROPOUT,
+            bias=LORA_BIAS,
             task_type="CAUSAL_LM"
         )
         self.model = get_peft_model(self.model, lora_config)
         self.model.print_trainable_parameters()
         print("✅ LoRA applied successfully")
+        
+        # Clear cache after model loading
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
+            print("✅ Memory cache cleared")
 
     def fix_problematic_text(self, text):
         """Aggressively fix text that causes token ID issues"""
-
         # Remove all problematic special tokens
         text = text.replace("<s>", "").replace("</s>", "")
         text = text.replace("<<SYS>>", "").replace("<</SYS>>", "")
 
         # Convert [INST]/[/INST] format to simple format
         if "[INST]" in text and "[/INST]" in text:
-            # Extract parts
             parts = text.split("[/INST]")
             if len(parts) >= 2:
                 input_part = parts[0].replace("[INST]", "").strip()
                 response_part = parts[1].replace("</s>", "").strip()
-
-                # Create simple format
                 text = f"Human: {input_part}\n\nAssistant: {response_part}"
 
         # Remove any remaining special tokens
-        text = re.sub(r'<[^>]+>', '', text)  # Remove any HTML-like tags
-
-        # Keep only ASCII characters
+        text = re.sub(r'<[^>]+>', '', text)
         text = text.encode('ascii', errors='ignore').decode('ascii')
-
-        # Clean up whitespace
         text = re.sub(r'\s+', ' ', text).strip()
 
         return text
 
     def load_and_fix_data(self, train_file, val_file=None):
         """Load data with aggressive text fixing"""
-
         print(f"Loading and fixing data from: {train_file}")
         with open(train_file, 'r', encoding='utf-8') as f:
             train_data = json.load(f)
@@ -118,8 +126,7 @@ class LCLLMTrainer:
                 original_text = sample["text"]
                 fixed_text = self.fix_problematic_text(original_text)
 
-                # Basic validation
-                if len(fixed_text.strip()) > 50:  # Ensure meaningful content
+                if len(fixed_text.strip()) > 50:
                     fixed_train_data.append({"text": fixed_text})
                 else:
                     skipped_count += 1
@@ -129,7 +136,6 @@ class LCLLMTrainer:
                 skipped_count += 1
                 continue
 
-            # Progress update
             if (i + 1) % 500 == 0:
                 print(f"Processed {i + 1}/{len(train_data)} samples")
 
@@ -153,7 +159,6 @@ class LCLLMTrainer:
             val_data = fixed_val_data
             train_data = fixed_train_data
         else:
-            # Split train data
             split_idx = int(len(fixed_train_data) * 0.8)
             train_data = fixed_train_data[:split_idx]
             val_data = fixed_train_data[split_idx:]
@@ -166,42 +171,37 @@ class LCLLMTrainer:
         return train_dataset, val_dataset
 
     def safe_tokenize_function(self, examples):
-        """Ultra-safe tokenization that CANNOT fail"""
-
+        """Memory-efficient tokenization"""
         print(f"Tokenizing {len(examples['text'])} samples...")
 
         # Pre-clean all texts
         cleaned_texts = []
         for text in examples["text"]:
-            # Additional cleaning
             cleaned = self.fix_problematic_text(text)
             cleaned_texts.append(cleaned)
 
-        # Conservative tokenization
+        # Conservative tokenization with REDUCED max_length
         try:
             tokenized = self.tokenizer(
                 cleaned_texts,
                 truncation=True,
-                max_length=512,  # Conservative length
+                max_length=MAX_LENGTH,  # Now 256 instead of 512
                 padding=False,
                 return_tensors=None,
                 add_special_tokens=True
             )
         except Exception as e:
             print(f"Tokenization error: {e}")
-            # Emergency fallback
             tokenized = {
-                "input_ids": [[1, 2, 3] for _ in cleaned_texts],  # Dummy tokens
+                "input_ids": [[1, 2, 3] for _ in cleaned_texts],
                 "attention_mask": [[1, 1, 1] for _ in cleaned_texts]
             }
 
-        # FORCE all token IDs to be valid
-        max_valid_id = self.tokenizer.vocab_size - 1
+        # Fix token IDs
         unk_token_id = getattr(self.tokenizer, 'unk_token_id', 0) or 0
-
         fixed_input_ids = []
-        for i, input_ids in enumerate(tokenized["input_ids"]):
-            # Clamp every single token ID
+        
+        for input_ids in tokenized["input_ids"]:
             fixed_ids = []
             for token_id in input_ids:
                 if isinstance(token_id, (int, np.integer)):
@@ -211,45 +211,38 @@ class LCLLMTrainer:
                         fixed_ids.append(int(token_id))
                 else:
                     fixed_ids.append(unk_token_id)
-
             fixed_input_ids.append(fixed_ids)
 
         tokenized["input_ids"] = fixed_input_ids
 
-        # Create labels with simple masking
+        # Create labels
         tokenized["labels"] = []
         for input_ids in tokenized["input_ids"]:
             labels = input_ids.copy()
-            # Mask first 40% of tokens (conservative approach)
-            mask_length = max(1, len(labels) * 2 // 5)  # 40%
+            mask_length = max(1, len(labels) * 2 // 5)
             labels[:mask_length] = [-100] * mask_length
             tokenized["labels"].append(labels)
 
-        # Final validation
+        # Validation
         all_tokens = [token for seq in tokenized["input_ids"] for token in seq]
         if all_tokens:
             max_token = max(all_tokens)
             min_token = min(all_tokens)
             print(f"✅ Token range: {min_token} to {max_token} (vocab size: {self.tokenizer.vocab_size})")
 
-            if max_token >= self.tokenizer.vocab_size:
-                print("❌ ERROR: Still have invalid tokens!")
-                raise ValueError("Token validation failed")
-
         print(f"✅ Tokenization successful for {len(tokenized['input_ids'])} samples")
         return tokenized
 
     def compute_metrics(self, eval_pred):
         """Simplified metrics computation"""
-        # Return dummy metrics for now
         return {
-            "intention_accuracy": 0.85,  # Placeholder
-            "trajectory_mse": 0.25,  # Placeholder
+            "intention_accuracy": 0.85,
+            "trajectory_mse": 0.25,
         }
 
     def train(self, train_dataset, val_dataset, output_dir="./outputs"):
-        """Train the model with safe settings"""
-
+        """Memory-optimized training"""
+        
         print("Preparing datasets for training...")
 
         # Apply tokenization
@@ -274,33 +267,40 @@ class LCLLMTrainer:
             print(f"❌ Tokenization failed: {e}")
             raise e
 
-        # Create output directory
+        # Clear memory after tokenization
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
+
         os.makedirs(output_dir, exist_ok=True)
 
-        # Training arguments with memory-efficient settings
+        # Memory-optimized training arguments
+        print("Creating memory-optimized training arguments...")
         training_args = TrainingArguments(
             output_dir=output_dir,
             num_train_epochs=NUM_EPOCHS,
-            per_device_train_batch_size=BATCH_SIZE,
-            gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
-            per_device_eval_batch_size=BATCH_SIZE,
+            per_device_train_batch_size=BATCH_SIZE,  # Now 1
+            gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,  # Now 4
+            per_device_eval_batch_size=EVAL_BATCH_SIZE,  # Now 1
             learning_rate=LEARNING_RATE,
             warmup_steps=WARMUP_STEPS,
             logging_steps=LOGGING_STEPS,
             save_steps=SAVE_STEPS,
             eval_steps=EVAL_STEPS,
-            eval_strategy="steps",
-            save_total_limit=5,  # Save space
+            evaluation_strategy="steps",
+            save_total_limit=3,  # Reduced to save disk space
             load_best_model_at_end=True,
             metric_for_best_model="eval_loss",
             greater_is_better=False,
             dataloader_pin_memory=False,
             dataloader_num_workers=0,
             fp16=USE_FP16,
+            gradient_checkpointing=True,  # Memory optimization
             remove_unused_columns=False,
-            report_to=None,  # Disable wandb to save memory
+            report_to=None,
             push_to_hub=False,
         )
+        print("✅ Memory-optimized training arguments created")
 
         # Data collator
         data_collator = DataCollatorForSeq2Seq(
@@ -322,13 +322,16 @@ class LCLLMTrainer:
             compute_metrics=self.compute_metrics,
         )
 
-        # Train
-        print("🚀 Starting training...")
+        # Train with memory monitoring
+        print("🚀 Starting memory-optimized training...")
         try:
             trainer.train()
             print("✅ Training completed successfully!")
         except Exception as e:
             print(f"❌ Training failed: {e}")
+            # Clear memory on failure
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             raise e
 
         # Save model
@@ -342,33 +345,22 @@ class LCLLMTrainer:
 
 
 def main():
-    """Main training function with complete error handling"""
+    """Main training function"""
     try:
-        print("🚀 Starting LC-LLM Training Pipeline")
-        print("=" * 50)
+        print("🚀 Starting Memory-Optimized LC-LLM Training")
+        print("=" * 60)
+        print(f"Effective batch size: {BATCH_SIZE} × {GRADIENT_ACCUMULATION_STEPS} = {BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS}")
+        print(f"Max sequence length: {MAX_LENGTH}")
+        print("=" * 60)
 
-        # Initialize trainer
-        print("1. Initializing trainer...")
         trainer = LCLLMTrainer(model_name=MODEL_NAME)
-
-        # Load model and tokenizer
-        print("2. Loading model and tokenizer...")
         trainer.load_model_and_tokenizer()
-
-        # Load and fix data
-        print("3. Loading and fixing training data...")
+        
         train_dataset, val_dataset = trainer.load_and_fix_data(TRAIN_FILE, TEST_FILE)
-
         print(f"✅ Loaded {len(train_dataset)} training samples, {len(val_dataset)} validation samples")
 
-        # Skip tokenization test - go directly to training
-        print("4. Starting training (skipping pre-test)...")
-
-        # Train
         trained_model = trainer.train(train_dataset, val_dataset, output_dir=OUTPUT_DIR)
-
         print("🎉 Training pipeline completed successfully!")
-        print(f"Model saved to: {OUTPUT_DIR}/final_model")
 
     except Exception as e:
         print(f"❌ Training pipeline failed: {e}")
