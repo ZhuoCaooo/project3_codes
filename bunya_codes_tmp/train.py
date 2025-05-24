@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Memory-Optimized LC-LLM Training Script for Bunya
+Fixed LC-LLM Training Script based on literature implementation
+Addresses both memory and loss=0.0 issues
 """
 
 import torch
@@ -10,299 +11,259 @@ from datasets import Dataset
 from transformers import (
     AutoTokenizer, AutoModelForCausalLM,
     Trainer, TrainingArguments,
-    DataCollatorForSeq2Seq
+    DataCollatorForSeq2Seq,
+    BitsAndBytesConfig
 )
-from peft import LoraConfig, get_peft_model
-from config import *
+from peft import (
+    LoraConfig, 
+    get_peft_model,
+    prepare_model_for_int8_training
+)
 import numpy as np
 import re
 import gc
 
 
-class LCLLMTrainer:
+class FixedLCLLMTrainer:
     def __init__(self, model_name="microsoft/phi-2"):
         self.model_name = model_name
         self.tokenizer = None
         self.model = None
 
     def load_model_and_tokenizer(self):
-        """Load model and tokenizer with memory optimizations"""
+        """Load model with proper quantization like literature"""
         
-        # Set memory fragmentation limit
-        if hasattr(torch.cuda, 'set_per_process_memory_fraction'):
-            torch.cuda.set_per_process_memory_fraction(0.95)  # Use 95% of GPU memory max
+        # Set CUDA memory settings
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
         
         print(f"Loading tokenizer: {self.model_name}")
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True)
-
-        # Fix padding token
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            self.model_name, 
+            trust_remote_code=True,
+            padding_side='left'  # Like literature
+        )
+        
+        # Fix padding token like literature
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
-            print(f"Set pad token to: {self.tokenizer.pad_token}")
 
-        print(f"Loading model: {self.model_name}")
+        print(f"Loading model with 8-bit quantization...")
+        
+        # Use 8-bit quantization like literature
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
             torch_dtype=torch.float16,
             trust_remote_code=True,
-            device_map="auto",
-            low_cpu_mem_usage=True  # Memory optimization
+            device_map={"": 0},  # Single GPU like literature
+            load_in_8bit=True,  # Key: 8-bit quantization
+            low_cpu_mem_usage=True
         )
 
-        # Enable gradient checkpointing for memory efficiency
-        if hasattr(self.model, 'gradient_checkpointing_enable'):
-            self.model.gradient_checkpointing_enable()
-            print("✅ Gradient checkpointing enabled")
+        # Prepare for 8-bit training like literature
+        self.model = prepare_model_for_int8_training(self.model)
 
-        # Check and fix vocabulary compatibility
-        tokenizer_vocab_size = self.tokenizer.vocab_size
-        model_vocab_size = self.model.config.vocab_size
-
-        print(f"Tokenizer vocab size: {tokenizer_vocab_size}")
-        print(f"Model vocab size: {model_vocab_size}")
-
-        if tokenizer_vocab_size != model_vocab_size:
-            print("WARNING: Vocabulary size mismatch!")
-            print("Resizing model embeddings to match tokenizer...")
-            self.model.resize_token_embeddings(tokenizer_vocab_size)
-            print("✅ Model embeddings resized successfully")
-
-        # Apply LoRA configuration
-        print("Applying LoRA configuration...")
+        # LoRA config matching literature values
         lora_config = LoraConfig(
-            r=LORA_RANK,
-            lora_alpha=LORA_ALPHA,
-            target_modules=TARGET_MODULES,
-            lora_dropout=LORA_DROPOUT,
-            bias=LORA_BIAS,
+            r=64,                    # Literature value
+            lora_alpha=16,           # Literature value
+            target_modules=[         # Phi-2 equivalent of literature targets
+                "q_proj", "k_proj", "v_proj", "dense",
+                "fc1", "fc2"
+            ],
+            lora_dropout=0.05,
+            bias="none",
             task_type="CAUSAL_LM"
         )
+        
         self.model = get_peft_model(self.model, lora_config)
         self.model.print_trainable_parameters()
-        print("✅ LoRA applied successfully")
         
-        # Clear cache after model loading
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            gc.collect()
-            print("✅ Memory cache cleared")
+        # Enable gradient checkpointing
+        self.model.gradient_checkpointing_enable()
+        
+        print("✅ Model loaded with 8-bit quantization and LoRA")
 
-    def fix_problematic_text(self, text):
-        """Aggressively fix text that causes token ID issues"""
-        # Remove all problematic special tokens
-        text = text.replace("<s>", "").replace("</s>", "")
-        text = text.replace("<<SYS>>", "").replace("<</SYS>>", "")
-
-        # Convert [INST]/[/INST] format to simple format
+    def fix_data_format(self, text):
+        """Convert to proper instruction format like literature"""
+        # Remove problematic tokens
+        text = text.replace("<s>", "").replace("</s>", "").strip()
+        
+        # Convert to simple instruction format
         if "[INST]" in text and "[/INST]" in text:
             parts = text.split("[/INST]")
             if len(parts) >= 2:
-                input_part = parts[0].replace("[INST]", "").strip()
-                response_part = parts[1].replace("</s>", "").strip()
-                text = f"Human: {input_part}\n\nAssistant: {response_part}"
-
-        # Remove any remaining special tokens
-        text = re.sub(r'<[^>]+>', '', text)
-        text = text.encode('ascii', errors='ignore').decode('ascii')
-        text = re.sub(r'\s+', ' ', text).strip()
-
+                input_part = parts[0].replace("[INST]", "").replace("<<SYS>>", "").replace("<</SYS>>", "").strip()
+                response_part = parts[1].strip()
+                
+                # Simple format that works better
+                return f"<|im_start|>system\nYou are an expert driving prediction model.<|im_end|>\n<|im_start|>user\n{input_part}<|im_end|>\n<|im_start|>assistant\n{response_part}<|im_end|>"
+        
         return text
 
-    def load_and_fix_data(self, train_file, val_file=None):
-        """Load data with aggressive text fixing"""
-        print(f"Loading and fixing data from: {train_file}")
+    def load_and_process_data(self, train_file, val_file=None):
+        """Load and process data with proper formatting"""
+        print(f"Loading data from: {train_file}")
+        
         with open(train_file, 'r', encoding='utf-8') as f:
             train_data = json.load(f)
 
-        print(f"Original data size: {len(train_data)}")
-
-        # Fix all text data
-        print("Fixing problematic text...")
-        fixed_train_data = []
-        skipped_count = 0
-
+        # Process and fix data
+        processed_data = []
         for i, sample in enumerate(train_data):
             try:
                 original_text = sample["text"]
-                fixed_text = self.fix_problematic_text(original_text)
-
-                if len(fixed_text.strip()) > 50:
-                    fixed_train_data.append({"text": fixed_text})
-                else:
-                    skipped_count += 1
-
+                fixed_text = self.fix_data_format(original_text)
+                
+                if len(fixed_text.strip()) > 100:
+                    processed_data.append({"text": fixed_text})
+                    
             except Exception as e:
-                print(f"Error fixing sample {i}: {e}")
-                skipped_count += 1
+                print(f"Skipping sample {i}: {e}")
                 continue
 
-            if (i + 1) % 500 == 0:
-                print(f"Processed {i + 1}/{len(train_data)} samples")
-
-        print(f"✅ Data fixing complete. Kept {len(fixed_train_data)} samples, skipped {skipped_count}")
-
-        # Handle validation data
-        if val_file is not None and os.path.exists(val_file):
-            print(f"Loading validation data from: {val_file}")
-            with open(val_file, 'r', encoding='utf-8') as f:
-                val_data_raw = json.load(f)
-
-            fixed_val_data = []
-            for sample in val_data_raw:
-                try:
-                    fixed_text = self.fix_problematic_text(sample["text"])
-                    if len(fixed_text.strip()) > 50:
-                        fixed_val_data.append({"text": fixed_text})
-                except:
-                    continue
-
-            val_data = fixed_val_data
-            train_data = fixed_train_data
-        else:
-            split_idx = int(len(fixed_train_data) * 0.8)
-            train_data = fixed_train_data[:split_idx]
-            val_data = fixed_train_data[split_idx:]
-
-        print(f"Final dataset sizes - Train: {len(train_data)}, Val: {len(val_data)}")
-
-        train_dataset = Dataset.from_list(train_data)
-        val_dataset = Dataset.from_list(val_data)
-
-        return train_dataset, val_dataset
-
-    def safe_tokenize_function(self, examples):
-        """Memory-efficient tokenization"""
-        print(f"Tokenizing {len(examples['text'])} samples...")
-
-        # Pre-clean all texts
-        cleaned_texts = []
-        for text in examples["text"]:
-            cleaned = self.fix_problematic_text(text)
-            cleaned_texts.append(cleaned)
-
-        # Conservative tokenization with REDUCED max_length
-        try:
-            tokenized = self.tokenizer(
-                cleaned_texts,
-                truncation=True,
-                max_length=MAX_LENGTH,  # Now 256 instead of 512
-                padding=False,
-                return_tensors=None,
-                add_special_tokens=True
-            )
-        except Exception as e:
-            print(f"Tokenization error: {e}")
-            tokenized = {
-                "input_ids": [[1, 2, 3] for _ in cleaned_texts],
-                "attention_mask": [[1, 1, 1] for _ in cleaned_texts]
-            }
-
-        # Fix token IDs
-        unk_token_id = getattr(self.tokenizer, 'unk_token_id', 0) or 0
-        fixed_input_ids = []
+        print(f"Processed {len(processed_data)} samples")
         
-        for input_ids in tokenized["input_ids"]:
-            fixed_ids = []
-            for token_id in input_ids:
-                if isinstance(token_id, (int, np.integer)):
-                    if token_id >= self.tokenizer.vocab_size or token_id < 0:
-                        fixed_ids.append(unk_token_id)
-                    else:
-                        fixed_ids.append(int(token_id))
+        # Split data
+        if val_file and os.path.exists(val_file):
+            with open(val_file, 'r') as f:
+                val_data_raw = json.load(f)
+            val_data = [{"text": self.fix_data_format(s["text"])} for s in val_data_raw[:500]]  # Limit val size
+        else:
+            split_idx = int(len(processed_data) * 0.9)
+            val_data = processed_data[split_idx:]
+            processed_data = processed_data[:split_idx]
+
+        print(f"Final split - Train: {len(processed_data)}, Val: {len(val_data)}")
+        
+        return Dataset.from_list(processed_data), Dataset.from_list(val_data)
+
+    def tokenize_function(self, examples):
+        """Proper tokenization with instruction tuning like literature"""
+        print(f"Tokenizing {len(examples['text'])} samples...")
+        
+        # Process each text to separate input/output for training
+        model_inputs = {"input_ids": [], "attention_mask": [], "labels": []}
+        
+        for text in examples["text"]:
+            # Find the assistant response part
+            if "<|im_start|>assistant\n" in text:
+                parts = text.split("<|im_start|>assistant\n")
+                if len(parts) == 2:
+                    input_text = parts[0] + "<|im_start|>assistant\n"
+                    response_text = parts[1].replace("<|im_end|>", "")
+                    full_text = input_text + response_text
                 else:
-                    fixed_ids.append(unk_token_id)
-            fixed_input_ids.append(fixed_ids)
+                    full_text = text
+                    input_text = text[:len(text)//2]
+                    response_text = text[len(text)//2:]
+            else:
+                # Fallback
+                full_text = text
+                input_text = text[:len(text)//2]
+                response_text = text[len(text)//2:]
 
-        tokenized["input_ids"] = fixed_input_ids
-
-        # Create labels
-        tokenized["labels"] = []
-        for input_ids in tokenized["input_ids"]:
+            # Tokenize full text
+            full_tokens = self.tokenizer(
+                full_text,
+                truncation=True,
+                max_length=512,  # Reduced for memory
+                padding=False,
+                return_tensors=None
+            )
+            
+            # Tokenize input part to find where to mask
+            input_tokens = self.tokenizer(
+                input_text,
+                truncation=True,
+                max_length=512,
+                padding=False,
+                return_tensors=None
+            )
+            
+            input_ids = full_tokens["input_ids"]
+            attention_mask = full_tokens["attention_mask"]
+            
+            # Create labels - mask input part, keep response part
             labels = input_ids.copy()
-            mask_length = max(1, len(labels) * 2 // 5)
-            labels[:mask_length] = [-100] * mask_length
-            tokenized["labels"].append(labels)
+            input_length = min(len(input_tokens["input_ids"]), len(labels))
+            
+            # Mask input part (don't train on it)
+            for i in range(input_length):
+                labels[i] = -100
+                
+            model_inputs["input_ids"].append(input_ids)
+            model_inputs["attention_mask"].append(attention_mask)
+            model_inputs["labels"].append(labels)
 
-        # Validation
-        all_tokens = [token for seq in tokenized["input_ids"] for token in seq]
-        if all_tokens:
-            max_token = max(all_tokens)
-            min_token = min(all_tokens)
-            print(f"✅ Token range: {min_token} to {max_token} (vocab size: {self.tokenizer.vocab_size})")
-
-        print(f"✅ Tokenization successful for {len(tokenized['input_ids'])} samples")
-        return tokenized
-
-    def compute_metrics(self, eval_pred):
-        """Simplified metrics computation"""
-        return {
-            "intention_accuracy": 0.85,
-            "trajectory_mse": 0.25,
-        }
+        print(f"✅ Tokenized {len(model_inputs['input_ids'])} samples")
+        return model_inputs
 
     def train(self, train_dataset, val_dataset, output_dir="./outputs"):
-        """Memory-optimized training"""
+        """Training with proper arguments like literature"""
         
-        print("Preparing datasets for training...")
-
+        print("Processing datasets...")
+        
         # Apply tokenization
-        try:
-            train_dataset = train_dataset.map(
-                self.safe_tokenize_function,
-                batched=True,
-                remove_columns=["text"],
-                desc="Tokenizing training data"
-            )
-            print("✅ Training data tokenized successfully")
+        train_dataset = train_dataset.map(
+            self.tokenize_function,
+            batched=True,
+            batch_size=100,  # Small batches for memory
+            remove_columns=["text"],
+            desc="Tokenizing training data"
+        )
+        
+        val_dataset = val_dataset.map(
+            self.tokenize_function,
+            batched=True,
+            batch_size=100,
+            remove_columns=["text"],
+            desc="Tokenizing validation data"
+        )
 
-            val_dataset = val_dataset.map(
-                self.safe_tokenize_function,
-                batched=True,
-                remove_columns=["text"],
-                desc="Tokenizing validation data"
-            )
-            print("✅ Validation data tokenized successfully")
-
-        except Exception as e:
-            print(f"❌ Tokenization failed: {e}")
-            raise e
-
-        # Clear memory after tokenization
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            gc.collect()
+        # Clear memory
+        torch.cuda.empty_cache()
+        gc.collect()
 
         os.makedirs(output_dir, exist_ok=True)
 
-        # Memory-optimized training arguments
-        print("Creating memory-optimized training arguments...")
+        # Training arguments matching literature approach
         training_args = TrainingArguments(
             output_dir=output_dir,
-            num_train_epochs=NUM_EPOCHS,
-            per_device_train_batch_size=BATCH_SIZE,  # Now 1
-            gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,  # Now 4
-            per_device_eval_batch_size=EVAL_BATCH_SIZE,  # Now 1
-            learning_rate=LEARNING_RATE,
-            warmup_steps=WARMUP_STEPS,
-            logging_steps=LOGGING_STEPS,
-            save_steps=SAVE_STEPS,
-            eval_steps=EVAL_STEPS,
+            
+            # Literature training schedule
+            num_train_epochs=2,
+            learning_rate=5e-4,           # Literature value
+            warmup_steps=300,             # Reduced proportionally
+            
+            # Memory optimized batch sizes
+            per_device_train_batch_size=1,
+            per_device_eval_batch_size=1,
+            gradient_accumulation_steps=8,  # Literature uses 8
+            
+            # Evaluation
             evaluation_strategy="steps",
-            save_total_limit=3,  # Reduced to save disk space
+            eval_steps=100,
+            save_steps=100,
+            save_total_limit=3,
             load_best_model_at_end=True,
-            metric_for_best_model="eval_loss",
-            greater_is_better=False,
+            
+            # Memory optimizations
+            fp16=True,                    # Literature uses bf16, we use fp16
+            gradient_checkpointing=True,
             dataloader_pin_memory=False,
             dataloader_num_workers=0,
-            fp16=USE_FP16,
-            gradient_checkpointing=True,  # Memory optimization
+            
+            # Logging
+            logging_steps=10,
+            logging_dir=f"{output_dir}/logs",
+            
+            # Disable problematic features
             remove_unused_columns=False,
             report_to=None,
             push_to_hub=False,
         )
-        print("✅ Memory-optimized training arguments created")
 
-        # Data collator
+        # Data collator like literature
         data_collator = DataCollatorForSeq2Seq(
             tokenizer=self.tokenizer,
             padding=True,
@@ -311,7 +272,6 @@ class LCLLMTrainer:
         )
 
         # Initialize trainer
-        print("Initializing trainer...")
         trainer = Trainer(
             model=self.model,
             args=training_args,
@@ -319,47 +279,59 @@ class LCLLMTrainer:
             eval_dataset=val_dataset,
             data_collator=data_collator,
             tokenizer=self.tokenizer,
-            compute_metrics=self.compute_metrics,
         )
 
-        # Train with memory monitoring
-        print("🚀 Starting memory-optimized training...")
+        print("🚀 Starting training with fixed configuration...")
+        
         try:
+            # Clear cache before training
+            torch.cuda.empty_cache()
+            
+            # Train
             trainer.train()
-            print("✅ Training completed successfully!")
+            
+            # Save final model
+            final_model_path = os.path.join(output_dir, "final_model")
+            trainer.save_model(final_model_path)
+            self.tokenizer.save_pretrained(final_model_path)
+            
+            print(f"✅ Training completed! Model saved to {final_model_path}")
+            
         except Exception as e:
             print(f"❌ Training failed: {e}")
-            # Clear memory on failure
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            torch.cuda.empty_cache()
             raise e
 
-        # Save model
-        final_model_path = os.path.join(output_dir, "final_model")
-        print(f"Saving model to {final_model_path}")
-        trainer.save_model(final_model_path)
-        self.tokenizer.save_pretrained(final_model_path)
-
-        print(f"🎉 Training complete! Model saved to {final_model_path}")
         return trainer
 
 
 def main():
     """Main training function"""
     try:
-        print("🚀 Starting Memory-Optimized LC-LLM Training")
+        print("🚀 Starting Fixed LC-LLM Training")
         print("=" * 60)
-        print(f"Effective batch size: {BATCH_SIZE} × {GRADIENT_ACCUMULATION_STEPS} = {BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS}")
-        print(f"Max sequence length: {MAX_LENGTH}")
-        print("=" * 60)
-
-        trainer = LCLLMTrainer(model_name=MODEL_NAME)
+        
+        # Memory settings
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
+        
+        trainer = FixedLCLLMTrainer(model_name="microsoft/phi-2")
         trainer.load_model_and_tokenizer()
         
-        train_dataset, val_dataset = trainer.load_and_fix_data(TRAIN_FILE, TEST_FILE)
+        # Load data
+        train_dataset, val_dataset = trainer.load_and_process_data(
+            "../data/phi2_training_data.json",
+            "../data/phi2_testing_data.json"
+        )
+        
         print(f"✅ Loaded {len(train_dataset)} training samples, {len(val_dataset)} validation samples")
 
-        trained_model = trainer.train(train_dataset, val_dataset, output_dir=OUTPUT_DIR)
+        # Train
+        trained_model = trainer.train(
+            train_dataset, 
+            val_dataset, 
+            output_dir="./outputs_fixed"
+        )
+        
         print("🎉 Training pipeline completed successfully!")
 
     except Exception as e:
