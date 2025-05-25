@@ -1,9 +1,9 @@
 # Model configuration (MEMORY OPTIMIZED for Bunya)
 MODEL_NAME = "microsoft/phi-2"
-MAX_LENGTH = 256  # REDUCED from 512 to save memory
+MAX_LENGTH = 1024  # REDUCED from 512 to save memory
 BATCH_SIZE = 1  # REDUCED from 4 to save memory  
 LEARNING_RATE = 5e-4  # Keep same
-NUM_EPOCHS = 2  # Keep same
+NUM_EPOCHS = 3  # Keep same
 WARMUP_STEPS = 300  # REDUCED proportionally (was 600)
 GRADIENT_ACCUMULATION_STEPS = 4  # REDUCED from 8 to save memory
 WEIGHT_DECAY = 0.01
