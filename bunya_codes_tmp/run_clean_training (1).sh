@@ -2,7 +2,7 @@
 #SBATCH --job-name=phi2_clean_training
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=2
 #SBATCH --mem=32G
 #SBATCH --time=8:00:00
 #SBATCH --qos=gpu

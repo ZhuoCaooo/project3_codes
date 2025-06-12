@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Clean Phi-2 LC-LLM training script - No quantization dependencies
-Includes all key improvements: precise tokenization, optimized LoRA
+FIXED Phi-2 LC-LLM training script
+Key fix: Let PEFT handle parameter management automatically
 """
 
 import torch
@@ -52,7 +52,6 @@ def load_and_process_data(data_file, max_samples=None):
 def precise_tokenization(examples, tokenizer, max_length=1200):
     """
     Literature-style precise tokenization with exact masking
-    This is the KEY improvement from the paper
     """
     model_inputs = {"input_ids": [], "attention_mask": [], "labels": []}
     
@@ -92,10 +91,10 @@ def precise_tokenization(examples, tokenizer, max_length=1200):
         else:
             input_length = len(input_tokens["input_ids"])
         
-        # Step 4: Create labels with precise masking (CRITICAL IMPROVEMENT)
+        # Step 4: Create labels with precise masking
         labels = full_input_ids.copy()
         
-        # Mask input part with -100 (literature approach)
+        # Mask input part with -100
         for i in range(min(input_length, len(labels))):
             labels[i] = -100
         
@@ -106,8 +105,8 @@ def precise_tokenization(examples, tokenizer, max_length=1200):
     return model_inputs
 
 def main():
-    """Main training function"""
-    logger.info("🚀 Starting Clean Phi-2 LC-LLM Training")
+    """Main training function with FIXED parameter management"""
+    logger.info("🚀 Starting FIXED Phi-2 LC-LLM Training")
     
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained("microsoft/phi-2", trust_remote_code=True)
@@ -115,24 +114,22 @@ def main():
     tokenizer.padding_side = "left"
     logger.info("✅ Tokenizer loaded")
     
-    # Load model (clean FP16)
+    # Load model in FP16 - NO MANUAL PARAMETER FREEZING!
     model = AutoModelForCausalLM.from_pretrained(
         "microsoft/phi-2",
         torch_dtype=torch.float16,
         trust_remote_code=True,
         device_map="auto"
     )
-    logger.info("✅ Model loaded with FP16")
+    logger.info("✅ Base model loaded")
     
-    # Create optimized LoRA config
+    # Create LoRA config
     lora_config = LoraConfig(
-        r=32,  # Literature: reduced for stability
-        lora_alpha=64,  # Literature: 2x rank ratio
+        r=32,
+        lora_alpha=64,
         target_modules=[
-            # Attention modules
-            "q_proj", "k_proj", "v_proj", "dense",
-            # Phi-2 MLP modules (key improvement)
-            "fc1", "fc2"
+            "q_proj", "k_proj", "v_proj", "dense",  # Attention layers
+            "fc1", "fc2"  # MLP layers for Phi-2
         ],
         lora_dropout=0.05,
         bias="none",
@@ -140,9 +137,34 @@ def main():
         inference_mode=False,
     )
     
+    # Apply LoRA - PEFT handles parameter freezing automatically!
     model = get_peft_model(model, lora_config)
+    
+    # ✅ CRITICAL FIX: Don't manually freeze/unfreeze anything!
+    # PEFT has already:
+    # 1. Frozen all base model parameters
+    # 2. Made LoRA parameters trainable
+    # 3. Set up proper gradient flow
+    
+    # Verify the setup
     model.print_trainable_parameters()
-    logger.info("✅ LoRA adapters added")
+    
+    # Ensure training mode
+    model.train()
+    
+    # ✅ VERIFICATION: Check that parameters are properly set up
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model.parameters())
+    logger.info(f"🔍 Verification:")
+    logger.info(f"   Trainable: {trainable_params:,}")
+    logger.info(f"   Total: {total_params:,}")
+    logger.info(f"   Percentage: {100 * trainable_params / total_params:.2f}%")
+    
+    # ✅ CRITICAL: Verify some parameters actually require gradients
+    has_trainable = any(p.requires_grad for p in model.parameters())
+    if not has_trainable:
+        raise RuntimeError("❌ NO TRAINABLE PARAMETERS FOUND!")
+    logger.info("✅ LoRA setup verified - parameters ready for training")
     
     # Load and process data
     dataset = load_and_process_data("../data/phi2_training_data.json")
@@ -172,17 +194,20 @@ def main():
     
     logger.info("✅ Precise tokenization completed")
     
-    # Training arguments (literature optimized)
+    # ✅ FIXED: Training arguments with proper learning rate schedule
     training_args = TrainingArguments(
-        output_dir="./outputs_phi2_clean",
+        output_dir="./outputs_phi2_fixed",
         num_train_epochs=3,
-        learning_rate=2e-4,  # Literature value
-        warmup_steps=200,
         
-        # Batch strategy for long sequences
+        # ✅ CRITICAL FIX: Proper learning rate setup
+        learning_rate=2e-4,
+        lr_scheduler_type="cosine",  # Better than linear decay
+        warmup_ratio=0.03,  # Use ratio instead of fixed steps
+        
+        # Batch strategy
         per_device_train_batch_size=1,
         per_device_eval_batch_size=1,
-        gradient_accumulation_steps=16,  # Effective batch = 16
+        gradient_accumulation_steps=8,
         
         # Evaluation
         evaluation_strategy="steps",
@@ -190,15 +215,15 @@ def main():
         save_steps=200,
         save_total_limit=3,
         
-        # Logging
-        logging_steps=25,
+        # Logging - more frequent to catch issues
+        logging_steps=10,  # More frequent logging
         logging_first_step=True,
         
         # Performance
         fp16=True,
-        gradient_checkpointing=True,
-        dataloader_pin_memory=False,  # Bunya compatible
-        dataloader_num_workers=0,     # Bunya compatible
+        gradient_checkpointing=False,
+        dataloader_pin_memory=False,
+        dataloader_num_workers=0,
         
         # Other
         remove_unused_columns=False,
@@ -206,6 +231,10 @@ def main():
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
         greater_is_better=False,
+        
+        # ✅ CRITICAL: Ensure proper optimizer setup
+        optim="adamw_torch",  # Explicit optimizer
+        weight_decay=0.01,
     )
     
     # Data collator
@@ -216,7 +245,7 @@ def main():
         pad_to_multiple_of=8
     )
     
-    # Create trainer
+    # ✅ Create trainer - PEFT model is ready!
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -226,21 +255,26 @@ def main():
         data_collator=data_collator,
     )
     
+    # ✅ VERIFICATION: Check trainer sees the parameters
+    optimizer = trainer.create_optimizer()
+    param_groups = optimizer.param_groups
+    total_optimizer_params = sum(len(group['params']) for group in param_groups)
+    logger.info(f"🔍 Optimizer verification:")
+    logger.info(f"   Parameter groups: {len(param_groups)}")
+    logger.info(f"   Total parameters in optimizer: {total_optimizer_params}")
+    logger.info(f"   Learning rate: {param_groups[0]['lr']}")
+    
+    if total_optimizer_params == 0:
+        raise RuntimeError("❌ OPTIMIZER HAS NO PARAMETERS!")
+    
     # Start training
     logger.info("🎯 Starting training...")
     trainer.train()
     
     # Save final model
-    final_save_path = "./phi2_lc_llm_clean_final"
+    final_save_path = "./phi2_lc_llm_fixed_final"
     trainer.save_model(final_save_path)
     logger.info(f"✅ Training completed! Model saved to: {final_save_path}")
-    
-    logger.info("📊 Training Summary:")
-    logger.info(f"- Clean FP16 training (no quantization issues)")
-    logger.info(f"- Precise tokenization with exact masking")
-    logger.info(f"- Optimized LoRA: r=32, alpha=64")
-    logger.info(f"- Phi-2 specific modules: fc1, fc2")
-    logger.info(f"- Literature learning rate: 2e-4")
 
 if __name__ == "__main__":
     main()
