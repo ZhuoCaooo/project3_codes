@@ -8,3 +8,4 @@
 /.idea/
 *.json
 convert_to_phi2.py
+/output_4sbefore_2safter
