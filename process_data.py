@@ -2,7 +2,7 @@ from read_data import *
 import random
 
 # HighD frame_rate = 25 Hz
-FRAME_TAKEN = 250      # 10 seconds total (250 frames at 25 Hz)
+FRAME_TAKEN = 150     # 10 seconds total (250 frames at 25 Hz)
 FRAME_BEFORE = -50     # Include 50 frames (2 seconds) after crossing
 FRAME_BEFORE_FLAG = True  # Use the FRAME_BEFORE parameter
 
@@ -253,18 +253,18 @@ def run(number):
                 new_lane = tracks_csv[i][LANE_ID][frame_num]
                 direction = determine_change_direction(original_lane, new_lane)
                 # calculate the starting frame
-                starting_change = frame_num - 1
-                while starting_change > last_boundary:
-                    if detect_lane_change(lanes_info[original_lane], tracks_csv[i][Y][starting_change], lane_width, tracks_meta[i][HEIGHT]):
+                crossing_frame = frame_num - 1
+                while crossing_frame > last_boundary:
+                    if detect_lane_change(lanes_info[original_lane], tracks_csv[i][Y][crossing_frame], lane_width, tracks_meta[i][HEIGHT]):
                         break
-                    starting_change -= 1
+                    crossing_frame -= 1
                 # calculate the starting and ending frame
                 if FRAME_BEFORE_FLAG:
-                    starting_point = starting_change - FRAME_TAKEN - FRAME_BEFORE
-                    ending_point = starting_change - FRAME_BEFORE
+                    starting_point = crossing_frame - FRAME_TAKEN - FRAME_BEFORE
+                    ending_point = crossing_frame - FRAME_BEFORE
                 else:
-                    starting_point = starting_change - FRAME_TAKEN
-                    ending_point = starting_change
+                    starting_point = crossing_frame - FRAME_TAKEN
+                    ending_point = crossing_frame
                 if starting_point > last_boundary:
                     changing_tuple_list.append(
                         (starting_point, ending_point, direction))
