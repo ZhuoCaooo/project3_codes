@@ -319,7 +319,7 @@ def main():
     converter = LCLLMDataConverter()
 
     # Process your data
-    pickle_files = glob.glob("output_8sbefore_2safter/*.pickle")
+    pickle_files = glob.glob("output_4sbefore_2safter/*.pickle")
     all_samples = []
 
     for file_path in pickle_files[45:61]:  # Process first 3 files

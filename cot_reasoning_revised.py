@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
 Convert numerical trajectory data to LC-LLM format (matching actual paper format)
-Based on analysis of real LC-LLM training data
+FIXED: Properly handles 25 Hz data structure (150 frames total)
+- 4s before crossing = 100 frames (frames 0-99)
+- 2s after crossing = 50 frames (frames 100-149)
+- Current frame = frame 99 (just before crossing)
+- Crossing boundary = frame 100
 """
 
 import json
@@ -58,29 +62,39 @@ Output:
             return "single", 1  # Single lane (rare)
 
     def create_historical_positions(self, history_frames: List[Tuple]) -> str:
-        """FIXED: Create 6 historical positions properly"""
+        """Create 6 historical positions properly for 25 Hz data"""
         positions = []
 
-        if len(history_frames) < 6:
-            # Pad with the first frame if not enough history
-            padded_frames = [history_frames[0]] * (6 - len(history_frames)) + history_frames
-        else:
-            # Take last 6 frames
-            padded_frames = history_frames[-6:]
+        # For 25 Hz data, sample every 10 frames (0.4s intervals) from last 2 seconds (50 frames)
+        # We want 6 positions going back 2 seconds at 0.4s intervals
+        sample_interval = 10  # 0.4s * 25 Hz = 10 frames
 
-        # Generate positions going backwards in time
-        for i, frame in enumerate(padded_frames):
-            time_offset = (5 - i) * 0.4  # 0.4s intervals, going backwards
+        if len(history_frames) < 60:  # Need at least 60 frames for 6 positions
+            # Pad with the first frame if not enough history
+            padded_frames = [history_frames[0]] * (60 - len(history_frames)) + history_frames
+        else:
+            # Take last 60 frames (2.4 seconds)
+            padded_frames = history_frames[-60:]
+
+        # Sample every 10th frame, going backwards
+        for i in range(6):
+            frame_idx = len(padded_frames) - 1 - (i * sample_interval)
+            frame_idx = max(0, frame_idx)  # Ensure valid index
+            frame = padded_frames[frame_idx]
+
+            time_offset = i * 0.4  # 0.4s intervals, going backwards
             x_velocity = frame[self.X_VELOCITY]  # KEEP sign for direction
             x_pos = -time_offset * x_velocity  # Negative offset (going back in time)
             y_pos = frame[self.DELTA_Y]
 
             positions.append(f"({x_pos:.2f},{y_pos:.2f})")
 
+        # Reverse to get chronological order (oldest to newest)
+        positions.reverse()
         return ", ".join(positions)
 
     def create_surrounding_vehicles_info(self, current_frame: Tuple) -> List[str]:
-        """FIXED: Better surrounding vehicle info"""
+        """Better surrounding vehicle info"""
         surrounding_info = []
 
         # Use speed magnitude for comparisons, but preserve direction in descriptions
@@ -103,7 +117,7 @@ Output:
         # Behind vehicle
         if current_frame[self.FOLLOWING_TTC] < 200:
             vehicle_type = "Car" if current_frame[self.CAR_TYPE] > 0 else "Truck"
-            speed = ego_velocity_kmh - (10 * (1 if ego_velocity_kmh > 0 else -1))  # ← FIXED
+            speed = ego_velocity_kmh - (10 * (1 if ego_velocity_kmh > 0 else -1))
             surrounding_info.append(
                 f"- Behind: a {vehicle_type} traveling at {speed:.2f} km/h of X-axis, "
                 f"with a distance of {current_frame[self.FOLLOWING_TTC]:.0f} m."
@@ -112,7 +126,7 @@ Output:
         # Left front
         if current_frame[self.LEFT_PRECEDING_TTC] < 200:
             vehicle_type = "Car" if current_frame[self.CAR_TYPE] > 0 else "Truck"
-            speed = ego_velocity_kmh + (15 * (1 if ego_velocity_kmh > 0 else -1))  # ← Make sure this is correct too
+            speed = ego_velocity_kmh + (15 * (1 if ego_velocity_kmh > 0 else -1))
             surrounding_info.append(
                 f"- Left front: a {vehicle_type} traveling at {speed:.2f} km/h of X-axis, "
                 f"with a distance of {current_frame[self.LEFT_PRECEDING_TTC]:.0f} m."
@@ -123,7 +137,7 @@ Output:
         return surrounding_info
 
     def generate_notable_features(self, current_frame: Tuple, lane_position: str) -> List[str]:
-        """FIXED: Better logic for vehicle analysis"""
+        """Better logic for vehicle analysis"""
         features = []
 
         # Fix velocity handling - use absolute values for speed comparison
@@ -139,7 +153,7 @@ Output:
         if abs(ax) > 0.5:
             features.append(f"Notable features: ax = {ax:.2f}")
 
-        # FIXED: Ahead vehicle analysis
+        # Ahead vehicle analysis
         if current_frame[self.PRECEDING_TTC] < 200:
             if current_frame[self.PRECEDING_TTC] < 80:  # Close vehicle
                 features.append("Notable feature: Ahead is block.")
@@ -148,7 +162,7 @@ Output:
         else:
             features.append("Notable feature: Ahead is free.")
 
-        # FIXED: Left lane analysis with proper speed comparison
+        # Left lane analysis with proper speed comparison
         if current_frame[self.LEFT_PRECEDING_TTC] < 200:
             # Assume left vehicle speed (estimate based on distance and lane)
             left_distance = current_frame[self.LEFT_PRECEDING_TTC]
@@ -201,34 +215,37 @@ Output:
             else:
                 return "Irregular right lane change."
 
-    def calculate_future_trajectory(self, current_frame: Tuple,
-                                    future_frames: List[Tuple], intention: int) -> str:
-        """FIXED: Proper trajectory calculation - preserve direction"""
+    def calculate_predicted_trajectory(self, current_frame: Tuple, intention: int) -> str:
+        """FIXED: Calculate predicted trajectory WITHOUT using actual future data
+        Note: Always predicts 4 points at 1-second intervals regardless of input data frequency"""
         trajectory_points = []
 
-        # KEEP negative velocities - they indicate direction!
+        # Current state
         vx = current_frame[self.X_VELOCITY]  # Preserve sign for direction
         vy = current_frame[self.Y_VELOCITY]
         current_y = current_frame[self.DELTA_Y]
 
-        for i in range(4):  # 4 points, 1 second each
+        # Predict trajectory based on current state and intention
+        for i in range(4):  # 4 points, 1 second each (standard for LC-LLM)
             time_step = i + 1
 
             # X position - preserve direction (negative = leftward, positive = rightward)
             x_pos = vx * time_step
 
-            # Y position based on intention
-            if i < len(future_frames):
-                # Use actual future position if available
-                y_pos = future_frames[i][self.DELTA_Y]
-            else:
-                # Estimate based on intention
-                if intention == 1:  # Left change
-                    y_pos = current_y + (time_step * 0.8)  # Gradual left movement
-                elif intention == 2:  # Right change
-                    y_pos = current_y - (time_step * 0.8)  # Gradual right movement
-                else:  # Keep lane
-                    y_pos = current_y + vy * time_step
+            # Y position prediction based on intention
+            if intention == 1:  # Left lane change
+                # Simulate gradual left movement (lane change takes ~3-4 seconds)
+                lane_change_progress = min(1.0, time_step / 3.0)  # Complete in 3 seconds
+                target_y_change = 3.5  # Standard lane width
+                y_pos = current_y + (lane_change_progress * target_y_change)
+            elif intention == 2:  # Right lane change
+                # Simulate gradual right movement
+                lane_change_progress = min(1.0, time_step / 3.0)
+                target_y_change = -3.5  # Standard lane width (negative for right)
+                y_pos = current_y + (lane_change_progress * target_y_change)
+            else:  # Keep lane (intention == 0)
+                # Small lateral movement based on current lateral velocity
+                y_pos = current_y + vy * time_step
 
             trajectory_points.append(f"({x_pos:.2f},{y_pos:.2f})")
 
@@ -236,21 +253,32 @@ Output:
 
     def convert_sample_to_lcllm_format(self, features_sequence: List[Tuple],
                                        direction_labels: List[int]) -> Dict:
-        """Convert trajectory sample to exact LC-LLM format"""
+        """FIXED: Convert trajectory sample to exact LC-LLM format with proper temporal structure"""
 
-        # Use middle frame as current
-        current_idx = len(features_sequence) // 2
+        # From your extraction script: 25 Hz data, 150 frames total (6 seconds)
+        # 4s before crossing = 100 frames (0-99), 2s after crossing = 50 frames (100-149)
+        # Crossing boundary is ALWAYS at frame 100
+        crossing_idx = 100  # Always at 4 seconds with 25 Hz data
+
+        # Current frame is just before crossing (end of 4s before period)
+        current_idx = crossing_idx - 1  # Frame 99 (last frame before crossing)
         current_frame = features_sequence[current_idx]
 
-        # Get history and future
-        history_frames = features_sequence[max(0, current_idx - 20):current_idx]
-        future_frames = features_sequence[current_idx + 1:current_idx + 5]
+        # History is the 4s before crossing (frames 0-99, 100 frames total)
+        history_frames = features_sequence[:crossing_idx]
 
-        # Determine intention (most common in future)
-        future_labels = direction_labels[current_idx:]
-        intention = max(set(future_labels), key=future_labels.count) if future_labels else 0
+        # Future is the 2s after crossing (frames 100-149, this is what we want to predict)
+        future_frames = features_sequence[crossing_idx:]
 
-        # Generate scenario components
+        # Intention should be determined from the future period (what WILL happen)
+        future_labels = direction_labels[crossing_idx:]
+        if future_labels:
+            intention = max(set(future_labels), key=future_labels.count)
+        else:
+            # Fallback: use the first frame after crossing
+            intention = direction_labels[crossing_idx] if crossing_idx < len(direction_labels) else 0
+
+        # Generate scenario components (using only information available before crossing)
         lane_position, lane_count = self.determine_lane_configuration(current_frame)
 
         # Vehicle information
@@ -266,10 +294,10 @@ Output:
         else:
             width, length = 2.5, np.random.uniform(12.0, 22.0)
 
-        # Historical positions
+        # Historical positions (using only pre-crossing data)
         historical_positions = self.create_historical_positions(history_frames)
 
-        # Surrounding vehicles
+        # Surrounding vehicles (using only pre-crossing data)
         surrounding_vehicles = self.create_surrounding_vehicles_info(current_frame)
 
         # Create scenario description
@@ -284,10 +312,12 @@ The information of target vehicle is as follow:
 The information of its surrounding vehicles (with a range of 200m) are listed as follow:
   {chr(10).join(surrounding_vehicles) if surrounding_vehicles else "  - "}"""
 
-        # Generate reasoning
+        # Generate reasoning (using only pre-crossing information)
         notable_features = self.generate_notable_features(current_frame, lane_position)
         potential_behavior = self.determine_potential_behavior(current_frame, intention, lane_position)
-        future_trajectory = self.calculate_future_trajectory(current_frame, future_frames, intention)
+
+        # FIXED: Predict trajectory WITHOUT using actual future data
+        future_trajectory = self.calculate_predicted_trajectory(current_frame, intention)
 
         # Map intention
         intention_map = {0: "0: Keep lane", 1: "1: Left lane change", 2: "2: Right lane change"}
@@ -318,8 +348,9 @@ def main():
 
     converter = LCLLMDataConverter()
 
-    # Process your data
-    pickle_files = glob.glob("output_8sbefore_2safter/*.pickle")
+    # Process your data - expecting 6s total at 25 Hz: 4s before + 2s after crossing
+    # 25 Hz = 150 frames total (100 before + 50 after)
+    pickle_files = glob.glob("output_4sbefore_2safter/*.pickle")
     all_samples = []
 
     for file_path in pickle_files[45:61]:  # Process first 3 files
@@ -329,7 +360,7 @@ def main():
             data = pickle.load(f)
 
         for features_sequence, direction_labels in data:
-            if len(features_sequence) >= 50:  # Minimum length check
+            if len(features_sequence) == 150:  # Exactly 150 frames: 4s before + 2s after crossing at 25 Hz
                 try:
                     sample = converter.convert_sample_to_lcllm_format(
                         features_sequence, direction_labels
@@ -345,7 +376,7 @@ def main():
     with open("lcllm_testing_data.json", 'w') as f:
         json.dump(all_samples, f, indent=2)
 
-    print(f"Saved {len(all_samples)} samples to lcllm_training_data.json")
+    print(f"Saved {len(all_samples)} samples to lcllm_testing_data.json")
 
     # Show example
     if all_samples:
