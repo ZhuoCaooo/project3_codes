@@ -76,6 +76,10 @@ Output:
             # Take last 60 frames (2.4 seconds)
             padded_frames = history_frames[-60:]
 
+        # Current frame (time 0) should be at (0, 0)
+        current_frame = padded_frames[-1]  # Last frame is current
+        current_y = current_frame[self.DELTA_Y]
+
         # Sample every 10th frame, going backwards
         for i in range(6):
             frame_idx = len(padded_frames) - 1 - (i * sample_interval)
@@ -85,7 +89,13 @@ Output:
             time_offset = i * 0.4  # 0.4s intervals, going backwards
             x_velocity = frame[self.X_VELOCITY]  # KEEP sign for direction
             x_pos = -time_offset * x_velocity  # Negative offset (going back in time)
-            y_pos = frame[self.DELTA_Y]
+
+            # FIXED: Calculate y position relative to current frame being (0,0)
+            if i == 0:  # Current frame
+                y_pos = 0.0  # Current position is always (0,0)
+            else:
+                # Calculate relative y position from current frame
+                y_pos = frame[self.DELTA_Y] - current_y
 
             positions.append(f"({x_pos:.2f},{y_pos:.2f})")
 
@@ -215,41 +225,59 @@ Output:
             else:
                 return "Irregular right lane change."
 
-    def calculate_predicted_trajectory(self, current_frame: Tuple, intention: int) -> str:
-        """FIXED: Calculate predicted trajectory WITHOUT using actual future data
-        Note: Always predicts 4 points at 1-second intervals regardless of input data frequency"""
+    def extract_actual_future_trajectory(self, current_frame: Tuple, future_frames: List[Tuple]) -> str:
+        """Extract actual future trajectory from the dataset (2 seconds after crossing)"""
         trajectory_points = []
 
-        # Current state
-        vx = current_frame[self.X_VELOCITY]  # Preserve sign for direction
-        vy = current_frame[self.Y_VELOCITY]
-        current_y = current_frame[self.DELTA_Y]
+        # Current position is (0,0)
+        current_y = 0.0
+        current_x = 0.0
 
-        # Predict trajectory based on current state and intention
-        for i in range(4):  # 4 points, 1 second each (standard for LC-LLM)
-            time_step = i + 1
+        # Extract trajectory from actual future data (2 seconds = 50 frames at 25 Hz)
+        # Sample at appropriate intervals to get trajectory points
 
-            # X position - preserve direction (negative = leftward, positive = rightward)
-            x_pos = vx * time_step
+        if len(future_frames) >= 50:  # We have full 2 seconds of future data
+            # Sample every 25 frames (1 second intervals) for 2 points
+            # Or sample every 12.5 frames (0.5 second intervals) for 4 points
+            # Let's use 4 points at 0.5 second intervals to match LC-LLM format
 
-            # Y position prediction based on intention
-            if intention == 1:  # Left lane change
-                # Simulate gradual left movement (lane change takes ~3-4 seconds)
-                lane_change_progress = min(1.0, time_step / 3.0)  # Complete in 3 seconds
-                target_y_change = 3.5  # Standard lane width
-                y_pos = current_y + (lane_change_progress * target_y_change)
-            elif intention == 2:  # Right lane change
-                # Simulate gradual right movement
-                lane_change_progress = min(1.0, time_step / 3.0)
-                target_y_change = -3.5  # Standard lane width (negative for right)
-                y_pos = current_y + (lane_change_progress * target_y_change)
-            else:  # Keep lane (intention == 0)
-                # Small lateral movement based on current lateral velocity
-                y_pos = current_y + vy * time_step
+            sample_indices = [12, 25, 37, 49]  # ~0.5s, 1s, 1.5s, 2s intervals
 
-            trajectory_points.append(f"({x_pos:.2f},{y_pos:.2f})")
+            for i, frame_idx in enumerate(sample_indices):
+                if frame_idx < len(future_frames):
+                    future_frame = future_frames[frame_idx]
 
-        return "[" + ", ".join(trajectory_points) + "]"
+                    # Calculate actual time step
+                    time_step = (frame_idx + 1) / 25.0  # Convert frame to seconds
+
+                    # X position: use actual velocity and time
+                    vx = current_frame[self.X_VELOCITY]
+                    x_pos = vx * time_step
+
+                    # Y position: extract from actual future data, relative to current (0,0)
+                    future_y = future_frame[self.DELTA_Y]
+                    y_pos = future_y - current_frame[self.DELTA_Y]  # Relative to current frame
+
+                    trajectory_points.append(f"({x_pos:.2f},{y_pos:.2f})")
+                else:
+                    # Fallback if not enough future data
+                    break
+
+        # If we don't have enough points, pad with the last known trajectory
+        while len(trajectory_points) < 4:
+            if trajectory_points:
+                # Extend the last point
+                last_point = trajectory_points[-1]
+                trajectory_points.append(last_point)
+            else:
+                # Fallback to simple calculation
+                time_step = len(trajectory_points) + 1
+                vx = current_frame[self.X_VELOCITY]
+                x_pos = vx * time_step * 0.5  # 0.5 second intervals
+                y_pos = 0.0  # No movement if no data
+                trajectory_points.append(f"({x_pos:.2f},{y_pos:.2f})")
+
+        return "[" + ", ".join(trajectory_points[:4]) + "]"
 
     def convert_sample_to_lcllm_format(self, features_sequence: List[Tuple],
                                        direction_labels: List[int]) -> Dict:
@@ -316,8 +344,8 @@ The information of its surrounding vehicles (with a range of 200m) are listed as
         notable_features = self.generate_notable_features(current_frame, lane_position)
         potential_behavior = self.determine_potential_behavior(current_frame, intention, lane_position)
 
-        # FIXED: Predict trajectory WITHOUT using actual future data
-        future_trajectory = self.calculate_predicted_trajectory(current_frame, intention)
+        # FIXED: Extract actual trajectory from future data (2 seconds after crossing)
+        future_trajectory = self.extract_actual_future_trajectory(current_frame, future_frames)
 
         # Map intention
         intention_map = {0: "0: Keep lane", 1: "1: Left lane change", 2: "2: Right lane change"}
@@ -342,7 +370,7 @@ Final Answer:
 
 
 def main():
-    """Convert your pickle data to LC-LLM format"""
+    """Convert your pickle data to LC-LLM format - generates both train and test data"""
     import pickle
     import glob
 
@@ -351,9 +379,17 @@ def main():
     # Process your data - expecting 6s total at 25 Hz: 4s before + 2s after crossing
     # 25 Hz = 150 frames total (100 before + 50 after)
     pickle_files = glob.glob("output_4sbefore_2safter/*.pickle")
-    all_samples = []
 
-    for file_path in pickle_files[45:61]:  # Process first 3 files
+    print(f"Found {len(pickle_files)} pickle files total")
+
+    # Generate training data (files 1-50)
+    print("\n" + "=" * 50)
+    print("GENERATING TRAINING DATA")
+    print("=" * 50)
+    train_files = pickle_files[0:50]  # Files 1-50
+    train_samples = []
+
+    for file_path in train_files:
         print(f"Processing {file_path}...")
 
         with open(file_path, 'rb') as f:
@@ -365,25 +401,61 @@ def main():
                     sample = converter.convert_sample_to_lcllm_format(
                         features_sequence, direction_labels
                     )
-                    all_samples.append(sample)
+                    train_samples.append(sample)
                 except Exception as e:
                     print(f"Error processing sample: {e}")
                     continue
 
-        print(f"Converted {len(data)} samples from {file_path}")
+    # Save training data
+    with open("lcllm_training_data.json", 'w') as f:
+        json.dump(train_samples, f, indent=2)
+    print(f"✓ Saved {len(train_samples)} TRAINING samples to lcllm_training_data.json")
 
-    # Save result
+    # Generate testing data (files 51-60)
+    print("\n" + "=" * 50)
+    print("GENERATING TESTING DATA")
+    print("=" * 50)
+    test_files = pickle_files[50:60]  # Files 51-60
+    test_samples = []
+
+    for file_path in test_files:
+        print(f"Processing {file_path}...")
+
+        with open(file_path, 'rb') as f:
+            data = pickle.load(f)
+
+        for features_sequence, direction_labels in data:
+            if len(features_sequence) == 150:  # Exactly 150 frames: 4s before + 2s after crossing at 25 Hz
+                try:
+                    sample = converter.convert_sample_to_lcllm_format(
+                        features_sequence, direction_labels
+                    )
+                    test_samples.append(sample)
+                except Exception as e:
+                    print(f"Error processing sample: {e}")
+                    continue
+
+    # Save testing data
     with open("lcllm_testing_data.json", 'w') as f:
-        json.dump(all_samples, f, indent=2)
+        json.dump(test_samples, f, indent=2)
+    print(f"✓ Saved {len(test_samples)} TESTING samples to lcllm_testing_data.json")
 
-    print(f"Saved {len(all_samples)} samples to lcllm_testing_data.json")
+    # Summary
+    print("\n" + "=" * 50)
+    print("SUMMARY")
+    print("=" * 50)
+    print(f"Training files processed: {len(train_files)} (files 1-50)")
+    print(f"Testing files processed: {len(test_files)} (files 51-60)")
+    print(f"Training samples: {len(train_samples)}")
+    print(f"Testing samples: {len(test_samples)}")
+    print(f"Total samples: {len(train_samples) + len(test_samples)}")
 
     # Show example
-    if all_samples:
+    if train_samples:
         print("\n" + "=" * 70)
         print("EXAMPLE OUTPUT (matches paper format):")
         print("=" * 70)
-        example_text = all_samples[0]["text"]
+        example_text = train_samples[0]["text"]
         # Pretty print by splitting at key sections
         parts = example_text.split("[/INST]")
         print("INPUT:", parts[0].replace("<s>[INST]", "").strip()[:500] + "...")
