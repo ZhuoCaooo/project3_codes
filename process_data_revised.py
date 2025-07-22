@@ -2,7 +2,7 @@ from read_data import *
 import random
 
 # HighD frame_rate = 25 Hz
-TRAJECTORY_LENGTH = 150        # Total trajectory length: 6 seconds (150 frames at 25 Hz)
+TRAJECTORY_LENGTH = 200       # Total trajectory length: 6 seconds (150 frames at 25 Hz)
 FRAMES_AFTER_CROSSING = 100     # Include 50 frames (2 seconds) after crossing
 INCLUDE_AFTER_CROSSING = True  # Use the FRAMES_AFTER_CROSSING parameter
 
