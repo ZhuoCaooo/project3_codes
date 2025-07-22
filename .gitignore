@@ -11,3 +11,4 @@ convert_to_phi2.py
 /output_4sbefore_2safter
 data_leakage_check.py
 *.pickle
+traj_analyze.py
