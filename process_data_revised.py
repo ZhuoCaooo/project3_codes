@@ -93,21 +93,20 @@ def run(number):
         Here is the list:
         0.Existence of left lane
         1.Existence of right lane
-        2.Difference of the ego car’s Y position and the lane center: ΔY
-        3.Ego car’s Y velocity: Vy
-        4.Ego car’s Y acceleration: Ay
-        5.Ego car’s x velocity: Vx
-        6.Ego car’s X acceleration: Ax
+        2.Difference of the ego car's Y position and the lane center: ΔY
+        3.Ego car's Y velocity: Vy
+        4.Ego car's Y acceleration: Ay
+        5.Ego car's x velocity: Vx
+        6.Ego car's X acceleration: Ax
         7.Ego car type: T
-        8.TTC of preceding car: TTCp
-        9.TTC of following car: TTCf
-        10.TTC of left preceding car: TTClp
-        11.TTC of left alongside car: TTCla
-        12.TTC of left following car: TTClf
-        13.TTC of right preceding car: TTCrp
-        14.TTC of right alongside car: TTCra
-        15.TTC of right following car: TTCrf
-        ！！！！！note that in this study, the ttc is not ttc, its the ACTUAL DISTANCE
+        8.Distance to preceding car: Dp
+        9.Distance to following car: Df
+        10.Distance to left preceding car: Dlp
+        11.Distance to left alongside car: Dla
+        12.Distance to left following car: Dlf
+        13.Distance to right preceding car: Drp
+        14.Distance to right alongside car: Dra
+        15.Distance to right following car: Drf
         '''
         going = 0  # 1 left, 2 right
         if lane_num == 4:
@@ -145,9 +144,9 @@ def run(number):
         cur_feature["x_acceleration"] = tracks_csv[i][X_ACCELERATION][frame_num]
         cur_feature["car_type"] = 1 if tracks_meta[i][CLASS] == "Car" else -1
 
-        def calculate_ttc(target_car_id):
+        def calculate_distance(target_car_id):
             """
-            Calculate time to collision of target car and current car
+            Calculate distance between target car and current car
             """
             # This is to replace the gap when the gap is too large or invalid
             unvalid_alter = 250
@@ -163,49 +162,49 @@ def run(number):
                 if going == 1:
                     # going left (up)
                     if cur_x > target_x:
-                        ttc = (cur_x - target_x)
-                        #ttc = (cur_x - target_x) / (cur_v - target_v)
+                        distance = (cur_x - target_x)
+                        #distance = (cur_x - target_x) / (cur_v - target_v)
                     else:
-                        ttc = (target_x - cur_x)
-                        #ttc = (target_x - cur_x) / (target_v - cur_v)
+                        distance = (target_x - cur_x)
+                        #distance = (target_x - cur_x) / (target_v - cur_v)
                 else:
                     # going right (down)
                     if cur_x > target_x:
-                        ttc = (cur_x - target_x)
-                        #ttc = (cur_x - target_x) / (target_v - cur_v)
+                        distance = (cur_x - target_x)
+                        #distance = (cur_x - target_x) / (target_v - cur_v)
                     else:
-                        ttc = (target_x - cur_x)
-                        #ttc = (target_x - cur_x) / (cur_v - target_v)
-                if ttc < 0:
+                        distance = (target_x - cur_x)
+                        #distance = (target_x - cur_x) / (cur_v - target_v)
+                if distance < 0:
                     return unvalid_alter
                 else:
-                    return ttc
+                    return distance
             else:
                 return unvalid_alter
 
         # surrounding cars info
-        cur_feature["preceding_ttc"] = calculate_ttc(
+        cur_feature["preceding_distance"] = calculate_distance(
             tracks_csv[i][PRECEDING_ID][frame_num])
 
-        cur_feature["following_ttc"] = calculate_ttc(
+        cur_feature["following_distance"] = calculate_distance(
             tracks_csv[i][FOLLOWING_ID][frame_num])
 
-        cur_feature["left_preceding_ttc"] = calculate_ttc(
+        cur_feature["left_preceding_distance"] = calculate_distance(
             tracks_csv[i][LEFT_PRECEDING_ID][frame_num])
 
-        cur_feature["left_alongside_ttc"] = calculate_ttc(
+        cur_feature["left_alongside_distance"] = calculate_distance(
             tracks_csv[i][LEFT_ALONGSIDE_ID][frame_num])
 
-        cur_feature["left_following_ttc"] = calculate_ttc(
+        cur_feature["left_following_distance"] = calculate_distance(
             tracks_csv[i][LEFT_FOLLOWING_ID][frame_num])
 
-        cur_feature["right_preceding_ttc"] = calculate_ttc(
+        cur_feature["right_preceding_distance"] = calculate_distance(
             tracks_csv[i][RIGHT_PRECEDING_ID][frame_num])
 
-        cur_feature["right_alongside_ttc"] = calculate_ttc(
+        cur_feature["right_alongside_distance"] = calculate_distance(
             tracks_csv[i][RIGHT_ALONGSIDE_ID][frame_num])
 
-        cur_feature["right_following_ttc"] = calculate_ttc(
+        cur_feature["right_following_distance"] = calculate_distance(
             tracks_csv[i][RIGHT_FOLLOWING_ID][frame_num])
 
         ret = tuple(cur_feature.values())
