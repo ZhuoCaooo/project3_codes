@@ -2,10 +2,9 @@ from read_data import *
 import random
 
 # HighD frame_rate = 25 Hz
-FRAME_TAKEN = 150     # 10 seconds total (250 frames at 25 Hz)
-FRAME_BEFORE = -50     # Include 50 frames (2 seconds) after crossing
-FRAME_BEFORE_FLAG = True  # Use the FRAME_BEFORE parameter
-
+TRAJECTORY_LENGTH = 150        # Total trajectory length: 6 seconds (150 frames at 25 Hz)
+FRAMES_AFTER_CROSSING = 100     # Include 50 frames (2 seconds) after crossing
+INCLUDE_AFTER_CROSSING = True  # Use the FRAMES_AFTER_CROSSING parameter
 
 def run(number):
     '''
@@ -94,19 +93,21 @@ def run(number):
         0.Existence of left lane
         1.Existence of right lane
         2.Difference of the ego car's Y position and the lane center: ΔY
-        3.Ego car's Y velocity: Vy
-        4.Ego car's Y acceleration: Ay
-        5.Ego car's x velocity: Vx
-        6.Ego car's X acceleration: Ax
-        7.Ego car type: T
-        8.Distance to preceding car: Dp
-        9.Distance to following car: Df
-        10.Distance to left preceding car: Dlp
-        11.Distance to left alongside car: Dla
-        12.Distance to left following car: Dlf
-        13.Distance to right preceding car: Drp
-        14.Distance to right alongside car: Dra
-        15.Distance to right following car: Drf
+        3.Ego car's X position: X
+        4.Ego car's Y position: Y
+        5.Ego car's Y velocity: Vy
+        6.Ego car's Y acceleration: Ay
+        7.Ego car's x velocity: Vx
+        8.Ego car's X acceleration: Ax
+        9.Ego car type: T
+        10.Distance to preceding car: Dp
+        11.Distance to following car: Df
+        12.Distance to left preceding car: Dlp
+        13.Distance to left alongside car: Dla
+        14.Distance to left following car: Dlf
+        15.Distance to right preceding car: Drp
+        16.Distance to right alongside car: Dra
+        17.Distance to right following car: Drf
         '''
         going = 0  # 1 left, 2 right
         if lane_num == 4:
@@ -130,15 +131,19 @@ def run(number):
         car_center = tracks_csv[i][Y][frame_num] + tracks_meta[i][HEIGHT] / 2
         if going == 1:
             cur_feature["delta_y"] = car_center - \
-                lanes_info[original_lane] - lane_width/2  # up
+                                     lanes_info[original_lane] - lane_width / 2  # up
             cur_feature["y_velocity"] = -tracks_csv[i][Y_VELOCITY][frame_num]
             cur_feature["y_acceleration"] = - \
                 tracks_csv[i][Y_ACCELERATION][frame_num]
         else:
             cur_feature["delta_y"] = lanes_info[original_lane] - \
-                car_center + lane_width/2  # down
+                                     car_center + lane_width / 2  # down
             cur_feature["y_velocity"] = tracks_csv[i][Y_VELOCITY][frame_num]
             cur_feature["y_acceleration"] = tracks_csv[i][Y_ACCELERATION][frame_num]
+
+        # ✅ ADD ACTUAL POSITIONS
+        cur_feature["x_position"] = tracks_csv[i][X][frame_num]
+        cur_feature["y_position"] = tracks_csv[i][Y][frame_num]
 
         cur_feature["x_velocity"] = tracks_csv[i][X_VELOCITY][frame_num]
         cur_feature["x_acceleration"] = tracks_csv[i][X_ACCELERATION][frame_num]
@@ -152,29 +157,27 @@ def run(number):
             unvalid_alter = 250
             if target_car_id != 0:
                 target_frame = tracks_meta[i][INITIAL_FRAME] + \
-                    frame_num - tracks_meta[target_car_id][INITIAL_FRAME]
+                               frame_num - tracks_meta[target_car_id][INITIAL_FRAME]
                 target_x = tracks_csv[target_car_id][X][target_frame]
                 cur_x = tracks_csv[i][X][frame_num]
                 target_v = tracks_csv[target_car_id][X_VELOCITY][target_frame]
                 cur_v = tracks_csv[i][X_VELOCITY][frame_num]
-                if target_v == cur_v:
-                    return unvalid_alter
                 if going == 1:
                     # going left (up)
                     if cur_x > target_x:
                         distance = (cur_x - target_x)
-                        #distance = (cur_x - target_x) / (cur_v - target_v)
+                        # distance = (cur_x - target_x) / (cur_v - target_v)
                     else:
                         distance = (target_x - cur_x)
-                        #distance = (target_x - cur_x) / (target_v - cur_v)
+                        # distance = (target_x - cur_x) / (target_v - cur_v)
                 else:
                     # going right (down)
                     if cur_x > target_x:
                         distance = (cur_x - target_x)
-                        #distance = (cur_x - target_x) / (target_v - cur_v)
+                        # distance = (cur_x - target_x) / (target_v - cur_v)
                     else:
                         distance = (target_x - cur_x)
-                        #distance = (target_x - cur_x) / (cur_v - target_v)
+                        # distance = (target_x - cur_x) / (cur_v - target_v)
                 if distance < 0:
                     return unvalid_alter
                 else:
@@ -258,11 +261,11 @@ def run(number):
                         break
                     crossing_frame -= 1
                 # calculate the starting and ending frame
-                if FRAME_BEFORE_FLAG:
-                    starting_point = crossing_frame - FRAME_TAKEN - FRAME_BEFORE
-                    ending_point = crossing_frame - FRAME_BEFORE
+                if INCLUDE_AFTER_CROSSING:
+                    starting_point = crossing_frame - TRAJECTORY_LENGTH + FRAMES_AFTER_CROSSING
+                    ending_point = crossing_frame + FRAMES_AFTER_CROSSING
                 else:
-                    starting_point = crossing_frame - FRAME_TAKEN
+                    starting_point = crossing_frame - TRAJECTORY_LENGTH
                     ending_point = crossing_frame
                 if starting_point > last_boundary:
                     changing_tuple_list.append(
@@ -297,23 +300,29 @@ def run(number):
 
     change_num = len(result)
 
-    if len(lane_keeping_ids) > len(result):
-        # make the lane keeping size the same as lane changing
-        lane_keeping_ids = random.sample(lane_keeping_ids, len(result))
+    # Calculate desired LK sample size (3x the LC trajectories)
+    desired_lk_size = len(result) * 3
+
+    if len(lane_keeping_ids) > desired_lk_size:
+        # Sample 3x lane changes
+        lane_keeping_ids = random.sample(lane_keeping_ids, desired_lk_size)
+    else:
+        # Use all available lane keeping vehicles (less than 3x but that's all we have)
+        print(f"Warning: Only {len(lane_keeping_ids)} LK vehicles available, wanted {desired_lk_size}")
 
     for i in lane_keeping_ids:
         cur_change = []
         original_lane = tracks_csv[i][LANE_ID][0]
         fail = False
         direction = []
-        for frame_num in range(1, FRAME_TAKEN+1):
+        for frame_num in range(1, TRAJECTORY_LENGTH+1):
             try:
                 cur_change.append(construct_features(
                     i, frame_num, original_lane))
                 direction.append(0)
 
             except:
-                # handle exception where the total frame is less than FRAME_TAKEN
+                # handle exception where the total frame is less than TRAJECTORY_LENGTH
                 fail = True
                 break
         if not fail:
