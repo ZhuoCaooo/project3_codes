@@ -2,9 +2,10 @@ from read_data import *
 import random
 
 # HighD frame_rate = 25 Hz
-TRAJECTORY_LENGTH = 200       # Total trajectory length: 6 seconds (150 frames at 25 Hz)
-FRAMES_AFTER_CROSSING = 100     # Include 50 frames (2 seconds) after crossing
+TRAJECTORY_LENGTH = 200  # Total trajectory length: 6 seconds (150 frames at 25 Hz)
+FRAMES_AFTER_CROSSING = 100  # Include 50 frames (2 seconds) after crossing
 INCLUDE_AFTER_CROSSING = True  # Use the FRAMES_AFTER_CROSSING parameter
+
 
 def run(number):
     '''
@@ -20,7 +21,7 @@ def run(number):
     lane_changing_ids = []
     lane_keeping_ids = []
     for key in tracks_meta:
-        if(tracks_meta[key][NUMBER_LANE_CHANGES] > 0):
+        if (tracks_meta[key][NUMBER_LANE_CHANGES] > 0):
             lane_changing_ids.append(key)
         else:
             lane_keeping_ids.append(key)
@@ -28,7 +29,7 @@ def run(number):
     # get the lane information
     lanes_info = {}
     lane_num = len(recording_meta[UPPER_LANE_MARKINGS]) + \
-        len(recording_meta[LOWER_LANE_MARKINGS]) - 2
+               len(recording_meta[LOWER_LANE_MARKINGS]) - 2
     if lane_num == 4:
         # 4 lanes
         lanes_info[2] = recording_meta[UPPER_LANE_MARKINGS][0]
@@ -57,7 +58,7 @@ def run(number):
         lanes_info[8] = recording_meta[LOWER_LANE_MARKINGS][1]
         lanes_info[9] = recording_meta[LOWER_LANE_MARKINGS][2]
         lane_width = ((lanes_info[3] - lanes_info[2]) + (lanes_info[4] - lanes_info[3]) + (
-            lanes_info[5] - lanes_info[4]) + (lanes_info[8] - lanes_info[7]) + (lanes_info[9] - lanes_info[8])) / 5
+                lanes_info[5] - lanes_info[4]) + (lanes_info[8] - lanes_info[7]) + (lanes_info[9] - lanes_info[8])) / 5
     else:
         print("Error: Invalid input -", number)
 
@@ -88,26 +89,27 @@ def run(number):
 
     def construct_features(i, frame_num, original_lane):
         '''
-        Construct all the features for the RNN to train:
-        Here is the list:
-        0.Existence of left lane
-        1.Existence of right lane
-        2.Difference of the ego car's Y position and the lane center: ΔY
-        3.Ego car's X position: X
-        4.Ego car's Y position: Y
-        5.Ego car's Y velocity: Vy
-        6.Ego car's Y acceleration: Ay
-        7.Ego car's x velocity: Vx
-        8.Ego car's X acceleration: Ax
-        9.Ego car type: T
-        10.Distance to preceding car: Dp
-        11.Distance to following car: Df
-        12.Distance to left preceding car: Dlp
-        13.Distance to left alongside car: Dla
-        14.Distance to left following car: Dlf
-        15.Distance to right preceding car: Drp
-        16.Distance to right alongside car: Dra
-        17.Distance to right following car: Drf
+        Construct all the features for the RNN to train.
+
+        CORRECTED feature list (18 features total, indices 0-17):
+        0. Existence of left lane
+        1. Existence of right lane
+        2. Difference of the ego car's Y position and the lane center: ΔY
+        3. Ego car's Y velocity: Vy
+        4. Ego car's Y acceleration: Ay
+        5. Ego car's X position: X
+        6. Ego car's Y position: Y
+        7. Ego car's X velocity: Vx
+        8. Ego car's X acceleration: Ax
+        9. Ego car type: T
+        10. Distance to preceding car: Dp
+        11. Distance to following car: Df
+        12. Distance to left preceding car: Dlp
+        13. Distance to left alongside car: Dla
+        14. Distance to left following car: Dlf
+        15. Distance to right preceding car: Drp
+        16. Distance to right alongside car: Dra
+        17. Distance to right following car: Drf
         '''
         going = 0  # 1 left, 2 right
         if lane_num == 4:
@@ -120,33 +122,42 @@ def run(number):
                 going = 1
             else:
                 going = 2
+
+        # Initialize feature dictionary to maintain consistent order
         cur_feature = {}
-        cur_feature["left_lane_exist"], cur_feature["right_lane_exist"] = determine_lane_exist(
-            original_lane)
+
+        # Features 0-1: Lane existence
+        cur_feature["left_lane_exist"], cur_feature["right_lane_exist"] = determine_lane_exist(original_lane)
 
         # We need to consider the fact that right/left are different for top/bottom lanes.
         # top lanes are going left      <----
         # bottom lanes are going right  ---->
         # left -> negative, right -> positive
         car_center = tracks_csv[i][Y][frame_num] + tracks_meta[i][HEIGHT] / 2
+
+        # Feature 2: Delta Y (lane center difference)
         if going == 1:
-            cur_feature["delta_y"] = car_center - \
-                                     lanes_info[original_lane] - lane_width / 2  # up
+            cur_feature["delta_y"] = car_center - lanes_info[original_lane] - lane_width / 2  # up
+            # Feature 3: Y velocity (corrected for direction)
             cur_feature["y_velocity"] = -tracks_csv[i][Y_VELOCITY][frame_num]
-            cur_feature["y_acceleration"] = - \
-                tracks_csv[i][Y_ACCELERATION][frame_num]
+            # Feature 4: Y acceleration (corrected for direction)
+            cur_feature["y_acceleration"] = -tracks_csv[i][Y_ACCELERATION][frame_num]
         else:
-            cur_feature["delta_y"] = lanes_info[original_lane] - \
-                                     car_center + lane_width / 2  # down
+            cur_feature["delta_y"] = lanes_info[original_lane] - car_center + lane_width / 2  # down
+            # Feature 3: Y velocity
             cur_feature["y_velocity"] = tracks_csv[i][Y_VELOCITY][frame_num]
+            # Feature 4: Y acceleration
             cur_feature["y_acceleration"] = tracks_csv[i][Y_ACCELERATION][frame_num]
 
-        # ✅ ADD ACTUAL POSITIONS
+        # Features 5-6: Absolute positions
         cur_feature["x_position"] = tracks_csv[i][X][frame_num]
         cur_feature["y_position"] = tracks_csv[i][Y][frame_num]
 
+        # Features 7-8: X velocity and acceleration
         cur_feature["x_velocity"] = tracks_csv[i][X_VELOCITY][frame_num]
         cur_feature["x_acceleration"] = tracks_csv[i][X_ACCELERATION][frame_num]
+
+        # Feature 9: Car type
         cur_feature["car_type"] = 1 if tracks_meta[i][CLASS] == "Car" else -1
 
         def calculate_distance(target_car_id):
@@ -166,18 +177,14 @@ def run(number):
                     # going left (up)
                     if cur_x > target_x:
                         distance = (cur_x - target_x)
-                        # distance = (cur_x - target_x) / (cur_v - target_v)
                     else:
                         distance = (target_x - cur_x)
-                        # distance = (target_x - cur_x) / (target_v - cur_v)
                 else:
                     # going right (down)
                     if cur_x > target_x:
                         distance = (cur_x - target_x)
-                        # distance = (cur_x - target_x) / (target_v - cur_v)
                     else:
                         distance = (target_x - cur_x)
-                        # distance = (target_x - cur_x) / (cur_v - target_v)
                 if distance < 0:
                     return unvalid_alter
                 else:
@@ -185,7 +192,7 @@ def run(number):
             else:
                 return unvalid_alter
 
-        # surrounding cars info
+        # Features 10-17: Surrounding car distances
         cur_feature["preceding_distance"] = calculate_distance(
             tracks_csv[i][PRECEDING_ID][frame_num])
 
@@ -210,13 +217,14 @@ def run(number):
         cur_feature["right_following_distance"] = calculate_distance(
             tracks_csv[i][RIGHT_FOLLOWING_ID][frame_num])
 
+        # Convert to tuple maintaining insertion order
         ret = tuple(cur_feature.values())
         return ret
 
     def detect_lane_change(lane_center, cur_y, lane_width, car_height):
         delta_y = abs(lane_center - cur_y)
         relative_diff = delta_y / car_height
-        if(relative_diff < 0.5):
+        if (relative_diff < 0.5):
             return True
         else:
             return False
@@ -234,7 +242,7 @@ def run(number):
         else:
             # left:
             if (ori_laneId == 2 and new_laneId == 3) or (ori_laneId == 4 and new_laneId == 5) \
-                or (ori_laneId == 3 and new_laneId == 4) or (ori_laneId == 7 and new_laneId == 6) \
+                    or (ori_laneId == 3 and new_laneId == 4) or (ori_laneId == 7 and new_laneId == 6) \
                     or (ori_laneId == 8 and new_laneId == 7) or (ori_laneId == 9 and new_laneId == 8):
                 return 1
             else:
@@ -250,14 +258,15 @@ def run(number):
         changing_tuple_list = []
         # 1. determine the frame we want to use
         for frame_num in range(1, len(tracks_csv[i][FRAME])):
-            if tracks_csv[i][LANE_ID][frame_num] != tracks_csv[i][LANE_ID][frame_num-1]:
-                original_lane = tracks_csv[i][LANE_ID][frame_num-1]
+            if tracks_csv[i][LANE_ID][frame_num] != tracks_csv[i][LANE_ID][frame_num - 1]:
+                original_lane = tracks_csv[i][LANE_ID][frame_num - 1]
                 new_lane = tracks_csv[i][LANE_ID][frame_num]
                 direction = determine_change_direction(original_lane, new_lane)
                 # calculate the starting frame
                 crossing_frame = frame_num - 1
                 while crossing_frame > last_boundary:
-                    if detect_lane_change(lanes_info[original_lane], tracks_csv[i][Y][crossing_frame], lane_width, tracks_meta[i][HEIGHT]):
+                    if detect_lane_change(lanes_info[original_lane], tracks_csv[i][Y][crossing_frame], lane_width,
+                                          tracks_meta[i][HEIGHT]):
                         break
                     crossing_frame -= 1
                 # calculate the starting and ending frame
@@ -287,7 +296,6 @@ def run(number):
                 continue
 
             # Check if end_idx is beyond available frames for this vehicle
-            # Add this line
             end_idx = min(end_idx, len(tracks_csv[i][FRAME]) - 1)
 
             for frame_num in range(start_idx, end_idx):
@@ -315,7 +323,7 @@ def run(number):
         original_lane = tracks_csv[i][LANE_ID][0]
         fail = False
         direction = []
-        for frame_num in range(1, TRAJECTORY_LENGTH+1):
+        for frame_num in range(1, TRAJECTORY_LENGTH + 1):
             try:
                 cur_change.append(construct_features(
                     i, frame_num, original_lane))

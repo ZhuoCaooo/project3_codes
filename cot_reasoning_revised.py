@@ -6,6 +6,7 @@ FIXES:
 2. Corrects velocity interpretation (accounts for sign flips)
 3. Uses proper reference frames for position calculation
 4. Handles realistic highway driving scenarios
+5. ✅ CORRECTED FEATURE INDICES to match updated data processing script
 """
 
 import json
@@ -15,14 +16,14 @@ from typing import List, Tuple, Dict
 
 class FixedLCLLMDataConverter:
     def __init__(self):
-        # Feature indices from your HighD processing script
+        # ✅ CORRECTED Feature indices to match the updated HighD processing script
         self.LEFT_LANE_EXIST = 0
         self.RIGHT_LANE_EXIST = 1
         self.DELTA_Y = 2
-        self.X_POSITION = 3  # Actual X position in HighD coordinates (meters)
-        self.Y_POSITION = 4  # Actual Y position in HighD coordinates (meters)
-        self.Y_VELOCITY = 5  # CAUTION: Sign-flipped for top lanes!
-        self.Y_ACCELERATION = 6  # CAUTION: Sign-flipped for top lanes!
+        self.Y_VELOCITY = 3        # ✅ CORRECTED: was 5, now 3
+        self.Y_ACCELERATION = 4    # ✅ CORRECTED: was 6, now 4
+        self.X_POSITION = 5        # ✅ CORRECTED: was 3, now 5
+        self.Y_POSITION = 6        # ✅ CORRECTED: was 4, now 6
         self.X_VELOCITY = 7
         self.X_ACCELERATION = 8
         self.CAR_TYPE = 9
@@ -119,9 +120,6 @@ Output:
         ref_x = reference_frame[self.X_POSITION]  # HighD coordinates (meters)
         ref_y = reference_frame[self.Y_POSITION]  # HighD coordinates (meters)
 
-        print(f"Historical positions - Traffic direction: {traffic_direction}")
-        print(f"Reference frame (t=-2s): X={ref_x:.1f}m, Y={ref_y:.1f}m")
-
         for i in range(5):
             frame_idx = i * 10  # 0, 10, 20, 30, 40 (every 0.4s)
             frame = padded_frames[frame_idx]
@@ -143,8 +141,6 @@ Output:
                 rel_x = raw_x - ref_x  # Forward movement
                 rel_y = raw_y - ref_y  # Lateral movement (positive = left)
 
-            print(
-                f"Frame {frame_idx} (t={-2.0 + 0.4 * i:.1f}s): Raw=({raw_x:.1f},{raw_y:.1f}), Rel=({rel_x:.1f},{rel_y:.1f})")
             positions.append(f"({rel_x:.2f},{rel_y:.2f})")
 
         return ", ".join(positions)
@@ -284,8 +280,6 @@ Output:
         ref_x = reference_frame[self.X_POSITION]
         ref_y = reference_frame[self.Y_POSITION]
 
-        print(f"Future trajectory - Reference (crossing): X={ref_x:.1f}m, Y={ref_y:.1f}m")
-
         # Future frames cover [0s, 4s] = 100 frames at 25 Hz
         # Sample at 1s intervals = every 25 frames: frames 24, 49, 74, 99
         sample_indices = [24, 49, 74, 99]  # 1s, 2s, 3s, 4s
@@ -306,7 +300,6 @@ Output:
                     rel_x = raw_x - ref_x  # Forward movement
                     rel_y = raw_y - ref_y  # Lateral movement
 
-                print(f"Future t={i + 1}s: Raw=({raw_x:.1f},{raw_y:.1f}), Rel=({rel_x:.1f},{rel_y:.1f})")
                 trajectory_points.append(f"({rel_x:.2f},{rel_y:.2f})")
             else:
                 # Fallback
@@ -353,9 +346,6 @@ Output:
             intention = max(set(future_labels), key=future_labels.count)
         else:
             intention = 0
-
-        print(f"\n{'=' * 60}")
-        print(f"Processing sample: Traffic direction {traffic_direction}, Intention {intention}")
 
         # Generate scenario components
         lane_position, lane_count = self.determine_lane_configuration(current_frame)
@@ -432,21 +422,20 @@ def main():
     pickle_files.sort()
 
     print(f"Found {len(pickle_files)} pickle files in {data_dir}")
+    print("Processing files: first 50 for training, last 10 for testing...")
 
-    # DEBUG MODE: Process only first file with 3 samples
-    debug_mode = True
+    # Split into training (first 50) and testing (last 10)
+    train_files = pickle_files[:50]
+    test_files = pickle_files[50:60] if len(pickle_files) >= 60 else pickle_files[50:]
 
-    if debug_mode:
-        print("\n" + "=" * 60)
-        print("DEBUG MODE: Processing first file with 3 samples")
-        print("=" * 60)
-        pickle_files = pickle_files[:1]  # Only first file
+    print(f"Training files: {len(train_files)}")
+    print(f"Testing files: {len(test_files)}")
 
+    # Process training data
     train_samples = []
+    total_train_processed = 0
 
-    for file_path in pickle_files:
-        print(f"\nProcessing {file_path}...")
-
+    for i, file_path in enumerate(train_files, 1):
         with open(file_path, 'rb') as f:
             data = pickle.load(f)
 
@@ -460,45 +449,66 @@ def main():
                     train_samples.append(sample)
                     sample_count += 1
 
-                    if debug_mode and sample_count >= 3:
-                        break  # Only 3 samples in debug mode
-
                 except Exception as e:
-                    print(f"Error processing sample {sample_count}: {e}")
+                    print(f"Error in training file {i}: {e}")
                     continue
 
-        if debug_mode:
-            break  # Only one file in debug mode
+        total_train_processed += sample_count
+        if i % 10 == 0 or i == len(train_files):  # Progress every 10 files
+            print(f"Training: {i}/{len(train_files)} files ({total_train_processed} samples)")
 
-    # Save results
-    output_file = "lcllm_data_fixed_highd.json"
-    with open(output_file, 'w') as f:
+    # Process testing data
+    test_samples = []
+    total_test_processed = 0
+
+    for i, file_path in enumerate(test_files, 1):
+        with open(file_path, 'rb') as f:
+            data = pickle.load(f)
+
+        sample_count = 0
+        for features_sequence, direction_labels in data:
+            if len(features_sequence) == 200:
+                try:
+                    sample = converter.convert_sample_to_lcllm_format(
+                        features_sequence, direction_labels
+                    )
+                    test_samples.append(sample)
+                    sample_count += 1
+
+                except Exception as e:
+                    print(f"Error in testing file {i}: {e}")
+                    continue
+
+        total_test_processed += sample_count
+
+    print(f"Testing: {len(test_files)}/{len(test_files)} files ({total_test_processed} samples)")
+
+    # Save training data
+    train_output_file = "lcllm_training_data.json"
+    with open(train_output_file, 'w') as f:
         json.dump(train_samples, f, indent=2)
 
-    print(f"\n{'=' * 60}")
-    print(f"RESULTS")
-    print(f"{'=' * 60}")
-    print(f"✓ Processed {len(train_samples)} samples")
-    print(f"✓ Saved to {output_file}")
-    print(f"✓ Fixed HighD coordinate system issues")
-    print(f"✓ Corrected velocity interpretations")
-    print(f"✓ Used realistic reference frames")
+    # Save testing data
+    test_output_file = "lcllm_testing_data.json"
+    with open(test_output_file, 'w') as f:
+        json.dump(test_samples, f, indent=2)
 
-    if debug_mode:
-        print(f"\n⚠️  DEBUG MODE: Change debug_mode=False for full processing")
+    print(f"\n✓ Conversion complete!")
+    print(f"✓ Training: {len(train_samples)} samples → {train_output_file}")
+    print(f"✓ Testing: {len(test_samples)} samples → {test_output_file}")
+    print(f"✓ Total: {len(train_samples) + len(test_samples)} samples from {len(pickle_files)} files")
 
-    # Show example if available
+    # Show brief example from training data
     if train_samples:
-        print(f"\n{'=' * 60}")
-        print(f"EXAMPLE OUTPUT:")
-        print(f"{'=' * 60}")
+        print(f"\nTraining sample preview:")
         example_text = train_samples[0]["text"]
-        parts = example_text.split("[/INST]")
-        input_part = parts[0].replace("<s>[INST]", "").strip()
-        output_part = parts[1].replace("</s>", "").strip() if len(parts) > 1 else ""
-
-        print("INPUT:", input_part[:400] + "...")
-        print("\nOUTPUT:", output_part[:300] + "...")
+        if "[/INST]" in example_text:
+            input_part = example_text.split("[/INST]")[0].replace("<s>[INST]", "").strip()
+            print(f"Length: {len(example_text)} characters")
+            print(f"Input preview: {input_part[:200]}...")
+        else:
+            print(f"Length: {len(example_text)} characters")
+            print(f"Preview: {example_text[:200]}...")
 
 
 if __name__ == "__main__":
