@@ -12,3 +12,9 @@ convert_to_phi2.py
 data_leakage_check.py
 *.pickle
 traj_analyze.py
+pal_sample_generation/data_check.py
+pal_sample_generation/poly_all.py
+pal_sample_generation/polynomial_smaple_inputs.py
+pal_sample_generation/polynomial_fit.py
+pal_sample_generation/sam_fit.py
+pal_sample_generation/trajectory_fitting_results.csv
