@@ -18,3 +18,4 @@ pal_sample_generation/polynomial_smaple_inputs.py
 pal_sample_generation/polynomial_fit.py
 pal_sample_generation/sam_fit.py
 pal_sample_generation/trajectory_fitting_results.csv
+pal_sample_generation/sam_all.py

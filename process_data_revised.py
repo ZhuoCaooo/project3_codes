@@ -135,19 +135,15 @@ def run(number):
         # left -> negative, right -> positive
         car_center = tracks_csv[i][Y][frame_num] + tracks_meta[i][HEIGHT] / 2
 
-        # Feature 2: Delta Y (lane center difference)
-        if going == 1:
-            cur_feature["delta_y"] = car_center - lanes_info[original_lane] - lane_width / 2  # up
-            # Feature 3: Y velocity (corrected for direction)
-            cur_feature["y_velocity"] = -tracks_csv[i][Y_VELOCITY][frame_num]
-            # Feature 4: Y acceleration (corrected for direction)
-            cur_feature["y_acceleration"] = -tracks_csv[i][Y_ACCELERATION][frame_num]
-        else:
-            cur_feature["delta_y"] = lanes_info[original_lane] - car_center + lane_width / 2  # down
-            # Feature 3: Y velocity
-            cur_feature["y_velocity"] = tracks_csv[i][Y_VELOCITY][frame_num]
-            # Feature 4: Y acceleration
-            cur_feature["y_acceleration"] = tracks_csv[i][Y_ACCELERATION][frame_num]
+        # Feature 2: Delta Y (consistent for all lanes)
+        # Positive = below lane center, Negative = above lane center
+        cur_feature["delta_y"] = car_center - (lanes_info[original_lane] + lane_width / 2)
+
+        # Feature 3: Y velocity (raw HighD values, no direction correction)
+        cur_feature["y_velocity"] = tracks_csv[i][Y_VELOCITY][frame_num]
+
+        # Feature 4: Y acceleration (raw HighD values, no direction correction)
+        cur_feature["y_acceleration"] = tracks_csv[i][Y_ACCELERATION][frame_num]
 
         # Features 5-6: Absolute positions
         cur_feature["x_position"] = tracks_csv[i][X][frame_num]
