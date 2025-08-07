@@ -62,9 +62,9 @@ def plot_trajectories():
 
     # Plot 1: Delta Y (distance from lane center)
     ax1 = axes[0, 0]
-    for seq in right_delta[:50]:  # Show first 50 for clarity
+    for seq in right_delta[:100]:  # Show first 50 for clarity
         ax1.plot(time_axis, seq, 'r-', alpha=0.3, linewidth=0.5)
-    for seq in left_delta[:50]:
+    for seq in left_delta[:100]:
         ax1.plot(time_axis, seq, 'b-', alpha=0.3, linewidth=0.5)
 
     ax1.axvline(x=0, color='black', linestyle='--', alpha=0.7, label='Boundary Crossing')
