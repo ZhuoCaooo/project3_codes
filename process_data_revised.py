@@ -1,6 +1,9 @@
 from read_data import *
 import random
 
+
+
+'''this script involves a complex coordination transformation process, but it has problems!!!!!!!!!!!!!!!!! dont use'''
 # HighD frame_rate = 25 Hz
 TRAJECTORY_LENGTH = 200  # Total trajectory length: 6 seconds (150 frames at 25 Hz)
 FRAMES_AFTER_CROSSING = 100  # Include 50 frames (2 seconds) after crossing
@@ -87,9 +90,74 @@ def run(number):
             else:
                 return 0, 1
 
+    def transform_coordinates_to_vehicle_centric(i, frame_num, original_lane):
+        '''
+        CORRECTED VERSION: Consistent Y transformation for all vehicles
+
+        Based on test results, the key insight is:
+        - Both upper and lower lane vehicles need Y flipped the SAME way
+        - Y increases in HighD = right-relative-to-driving for ALL vehicles
+        - We want positive Y = left-relative-to-driving for ALL vehicles
+        - So we flip Y for ALL vehicles consistently
+        '''
+        # Get raw HighD data
+        raw_x = tracks_csv[i][X][frame_num]
+        raw_y = tracks_csv[i][Y][frame_num]
+        raw_x_vel = tracks_csv[i][X_VELOCITY][frame_num]
+        raw_y_vel = tracks_csv[i][Y_VELOCITY][frame_num]
+        raw_x_acc = tracks_csv[i][X_ACCELERATION][frame_num]
+        raw_y_acc = tracks_csv[i][Y_ACCELERATION][frame_num]
+
+        # Determine driving direction from tracks_meta
+        driving_direction = tracks_meta[i][DRIVING_DIRECTION]
+
+        if driving_direction == 1:  # Upper lanes (vehicles moving LEFT in HighD)
+            # Flip X so they move in positive direction
+            transformed_x = -raw_x
+            transformed_x_vel = -raw_x_vel
+            transformed_x_acc = -raw_x_acc
+
+            # Flip Y so positive Y = left-relative-to-driving
+            transformed_y = -raw_y
+            transformed_y_vel = -raw_y_vel
+            transformed_y_acc = -raw_y_acc
+
+        else:  # Lower lanes (vehicles moving RIGHT in HighD)
+            # Keep X as is (already moving in positive direction)
+            transformed_x = raw_x
+            transformed_x_vel = raw_x_vel
+            transformed_x_acc = raw_x_acc
+
+            # Flip Y so positive Y = left-relative-to-driving (SAME flip as upper!)
+            transformed_y = -raw_y
+            transformed_y_vel = -raw_y_vel
+            transformed_y_acc = -raw_y_acc
+
+        return {
+            'x': transformed_x,
+            'y': transformed_y,
+            'x_velocity': transformed_x_vel,
+            'y_velocity': transformed_y_vel,
+            'x_acceleration': transformed_x_acc,
+            'y_acceleration': transformed_y_acc
+        }
+
+    # Also update your lane center calculation to be consistent:
+    def get_corrected_lane_center(original_lane, lanes_info, lane_width):
+        """
+        Get lane center in vehicle-centric coordinates (consistent with Y flip)
+        """
+        # Lane center in HighD coordinates
+        lane_center_highd = lanes_info[original_lane] + lane_width / 2
+
+        # Apply SAME Y transformation as coordinates: flip Y
+        lane_center_vehicle = -lane_center_highd
+
+        return lane_center_vehicle
+
     def construct_features(i, frame_num, original_lane):
         '''
-        Construct all the features for the RNN to train.
+        Construct all the features for the RNN to train with consistent vehicle-centric coordinates.
 
         CORRECTED feature list (18 features total, indices 0-17):
         0. Existence of left lane
@@ -111,111 +179,56 @@ def run(number):
         16. Distance to right alongside car: Dra
         17. Distance to right following car: Drf
         '''
-        going = 0  # 1 left, 2 right
-        if lane_num == 4:
-            if original_lane == 2 or original_lane == 3:
-                going = 1
-            else:
-                going = 2
-        else:
-            if original_lane == 2 or original_lane == 3 or original_lane == 4 or original_lane == 5:
-                going = 1
-            else:
-                going = 2
-
-        # Initialize feature dictionary to maintain consistent order
+        # Initialize feature dictionary
         cur_feature = {}
 
-        # Features 0-1: Lane existence
+        # Features 0-1: Lane existence (unchanged)
         cur_feature["left_lane_exist"], cur_feature["right_lane_exist"] = determine_lane_exist(original_lane)
 
-        # We need to consider the fact that right/left are different for top/bottom lanes.
-        # top lanes are going left      <----
-        # bottom lanes are going right  ---->
-        # left -> negative, right -> positive
-        car_center = tracks_csv[i][Y][frame_num] + tracks_meta[i][HEIGHT] / 2
+        # Get corrected coordinates
+        transformed_coords = transform_coordinates_to_vehicle_centric(i, frame_num, original_lane)
 
-        # Feature 2: Delta Y (consistent for all lanes)
-        # Positive = below lane center, Negative = above lane center
-        cur_feature["delta_y"] = car_center - (lanes_info[original_lane] + lane_width / 2)
+        # Get car center with corrected Y
+        car_height = tracks_meta[i][HEIGHT]
+        car_center_y = transformed_coords['y'] + car_height / 2
 
-        # Feature 3: Y velocity (raw HighD values, no direction correction)
-        cur_feature["y_velocity"] = tracks_csv[i][Y_VELOCITY][frame_num]
+        # Get corrected lane center
+        lane_center_vehicle = get_corrected_lane_center(original_lane, lanes_info, lane_width)
+        cur_feature["delta_y"] = car_center_y - lane_center_vehicle
 
-        # Feature 4: Y acceleration (raw HighD values, no direction correction)
-        cur_feature["y_acceleration"] = tracks_csv[i][Y_ACCELERATION][frame_num]
+        # Features 3-8: Vehicle state (corrected coordinates)
+        cur_feature["y_velocity"] = transformed_coords['y_velocity']
+        cur_feature["y_acceleration"] = transformed_coords['y_acceleration']
+        cur_feature["x_position"] = transformed_coords['x']
+        cur_feature["y_position"] = transformed_coords['y']
+        cur_feature["x_velocity"] = transformed_coords['x_velocity']
+        cur_feature["x_acceleration"] = transformed_coords['x_acceleration']
 
-        # Features 5-6: Absolute positions
-        cur_feature["x_position"] = tracks_csv[i][X][frame_num]
-        cur_feature["y_position"] = tracks_csv[i][Y][frame_num]
-
-        # Features 7-8: X velocity and acceleration
-        cur_feature["x_velocity"] = tracks_csv[i][X_VELOCITY][frame_num]
-        cur_feature["x_acceleration"] = tracks_csv[i][X_ACCELERATION][frame_num]
-
-        # Feature 9: Car type
+        # Feature 9: Car type (unchanged)
         cur_feature["car_type"] = 1 if tracks_meta[i][CLASS] == "Car" else -1
 
+        # Features 10-17: Distance calculations (unchanged)
         def calculate_distance(target_car_id):
-            """
-            Calculate distance between target car and current car
-            """
-            # This is to replace the gap when the gap is too large or invalid
             unvalid_alter = 250
             if target_car_id != 0:
-                target_frame = tracks_meta[i][INITIAL_FRAME] + \
-                               frame_num - tracks_meta[target_car_id][INITIAL_FRAME]
-                target_x = tracks_csv[target_car_id][X][target_frame]
-                cur_x = tracks_csv[i][X][frame_num]
-                target_v = tracks_csv[target_car_id][X_VELOCITY][target_frame]
-                cur_v = tracks_csv[i][X_VELOCITY][frame_num]
-                if going == 1:
-                    # going left (up)
-                    if cur_x > target_x:
-                        distance = (cur_x - target_x)
-                    else:
-                        distance = (target_x - cur_x)
-                else:
-                    # going right (down)
-                    if cur_x > target_x:
-                        distance = (cur_x - target_x)
-                    else:
-                        distance = (target_x - cur_x)
-                if distance < 0:
-                    return unvalid_alter
-                else:
-                    return distance
+                target_frame = tracks_meta[i][INITIAL_FRAME] + frame_num - tracks_meta[target_car_id][INITIAL_FRAME]
+                target_transformed = transform_coordinates_to_vehicle_centric(target_car_id, target_frame,
+                                                                              original_lane)
+                distance = abs(transformed_coords['x'] - target_transformed['x'])
+                return distance if distance >= 0 else unvalid_alter
             else:
                 return unvalid_alter
 
-        # Features 10-17: Surrounding car distances
-        cur_feature["preceding_distance"] = calculate_distance(
-            tracks_csv[i][PRECEDING_ID][frame_num])
+        cur_feature["preceding_distance"] = calculate_distance(tracks_csv[i][PRECEDING_ID][frame_num])
+        cur_feature["following_distance"] = calculate_distance(tracks_csv[i][FOLLOWING_ID][frame_num])
+        cur_feature["left_preceding_distance"] = calculate_distance(tracks_csv[i][LEFT_PRECEDING_ID][frame_num])
+        cur_feature["left_alongside_distance"] = calculate_distance(tracks_csv[i][LEFT_ALONGSIDE_ID][frame_num])
+        cur_feature["left_following_distance"] = calculate_distance(tracks_csv[i][LEFT_FOLLOWING_ID][frame_num])
+        cur_feature["right_preceding_distance"] = calculate_distance(tracks_csv[i][RIGHT_PRECEDING_ID][frame_num])
+        cur_feature["right_alongside_distance"] = calculate_distance(tracks_csv[i][RIGHT_ALONGSIDE_ID][frame_num])
+        cur_feature["right_following_distance"] = calculate_distance(tracks_csv[i][RIGHT_FOLLOWING_ID][frame_num])
 
-        cur_feature["following_distance"] = calculate_distance(
-            tracks_csv[i][FOLLOWING_ID][frame_num])
-
-        cur_feature["left_preceding_distance"] = calculate_distance(
-            tracks_csv[i][LEFT_PRECEDING_ID][frame_num])
-
-        cur_feature["left_alongside_distance"] = calculate_distance(
-            tracks_csv[i][LEFT_ALONGSIDE_ID][frame_num])
-
-        cur_feature["left_following_distance"] = calculate_distance(
-            tracks_csv[i][LEFT_FOLLOWING_ID][frame_num])
-
-        cur_feature["right_preceding_distance"] = calculate_distance(
-            tracks_csv[i][RIGHT_PRECEDING_ID][frame_num])
-
-        cur_feature["right_alongside_distance"] = calculate_distance(
-            tracks_csv[i][RIGHT_ALONGSIDE_ID][frame_num])
-
-        cur_feature["right_following_distance"] = calculate_distance(
-            tracks_csv[i][RIGHT_FOLLOWING_ID][frame_num])
-
-        # Convert to tuple maintaining insertion order
-        ret = tuple(cur_feature.values())
-        return ret
+        return tuple(cur_feature.values())
 
     def detect_lane_change(lane_center, cur_y, lane_width, car_height):
         delta_y = abs(lane_center - cur_y)
@@ -243,6 +256,9 @@ def run(number):
                 return 1
             else:
                 return 2
+
+    # Rest of your code remains the same...
+    # [The trajectory extraction logic stays identical]
 
     # list of list of features
     result = []
