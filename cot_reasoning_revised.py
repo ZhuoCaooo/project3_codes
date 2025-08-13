@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Fixed LC-LLM Data Converter - HighD Dataset Aware
-FIXES:
-1. Handles HighD coordinate system (top lanes going left, bottom lanes going right)
-2. Corrects velocity interpretation (accounts for sign flips)
-3. Uses proper reference frames for position calculation
-4. Handles realistic highway driving scenarios
-5. ✅ CORRECTED FEATURE INDICES to match updated data processing script
+Corrected LC-LLM Data Converter - Pure CoT Approach
+CORRECTIONS:
+1. Removed all coordinate transformation logic (unified trajectories)
+2. Uses simple coordinate calculations like second script
+3. Changed lateral movement threshold to 0.5 km/h
+4. Keeps pure CoT format (no SAM fitting)
+5. Fixed feature indices to match updated data processing script
 """
 
 import json
@@ -14,16 +14,16 @@ import numpy as np
 from typing import List, Tuple, Dict
 
 
-class FixedLCLLMDataConverter:
+class CorrectedLCLLMDataConverter:
     def __init__(self):
-        # ✅ CORRECTED Feature indices to match the updated HighD processing script
+        # ✅ Feature indices (matching the corrected second script)
         self.LEFT_LANE_EXIST = 0
         self.RIGHT_LANE_EXIST = 1
         self.DELTA_Y = 2
-        self.Y_VELOCITY = 3        # ✅ CORRECTED: was 5, now 3
-        self.Y_ACCELERATION = 4    # ✅ CORRECTED: was 6, now 4
-        self.X_POSITION = 5        # ✅ CORRECTED: was 3, now 5
-        self.Y_POSITION = 6        # ✅ CORRECTED: was 4, now 6
+        self.Y_VELOCITY = 3
+        self.Y_ACCELERATION = 4
+        self.X_POSITION = 5
+        self.Y_POSITION = 6
         self.X_VELOCITY = 7
         self.X_ACCELERATION = 8
         self.CAR_TYPE = 9
@@ -50,46 +50,6 @@ Output:
   - Trajectory (MOST IMPORTANT): 4 points, one every 1 second
   - [(x1,y1), (x2,y2), (x3,y3), (x4,y4)]"""
 
-    def determine_traffic_direction(self, features_sequence: List[Tuple]) -> int:
-        """Determine traffic direction from X velocity pattern"""
-        # Sample a few frames to determine overall direction
-        sample_frames = features_sequence[::10]  # Every 10th frame
-        x_velocities = [frame[self.X_VELOCITY] for frame in sample_frames]
-        avg_x_velocity = np.mean(x_velocities)
-
-        # In HighD:
-        # going = 1 (top lanes): moving leftward, X velocity should be negative
-        # going = 2 (bottom lanes): moving rightward, X velocity should be positive
-        if avg_x_velocity < 0:
-            return 1  # Top lanes, going left
-        else:
-            return 2  # Bottom lanes, going right
-
-    def get_corrected_velocities(self, frame: Tuple, traffic_direction: int) -> Tuple[float, float]:
-        """Get corrected velocities accounting for HighD coordinate system"""
-        x_vel = frame[self.X_VELOCITY]  # m/s
-        y_vel = frame[self.Y_VELOCITY]  # m/s (potentially sign-flipped)
-
-        # The Y velocity was negated for top lanes in your processing script
-        # We need to understand what this means for lane change interpretation
-
-        # For LC-LLM format, we want:
-        # - Positive Y velocity = moving toward left lane
-        # - Negative Y velocity = moving toward right lane
-
-        if traffic_direction == 1:  # Top lanes (going left)
-            # Y velocity was negated, so we need to interpret it correctly
-            # In HighD top lanes: positive Y = moving toward bottom of screen
-            # For lane changes: positive Y should mean moving to left lane
-            corrected_y_vel = y_vel  # Keep as processed (already negated in script)
-        else:  # Bottom lanes (going right)
-            # Y velocity normal
-            # In HighD bottom lanes: positive Y = moving toward top of screen
-            # For lane changes: positive Y should mean moving to left lane
-            corrected_y_vel = y_vel
-
-        return x_vel, corrected_y_vel
-
     def determine_lane_configuration(self, current_frame: Tuple) -> Tuple[str, int]:
         """Determine lane position and total lanes"""
         left_exists = current_frame[self.LEFT_LANE_EXIST] > 0.5
@@ -104,7 +64,7 @@ Output:
         else:
             return "single", 1  # Single lane (rare)
 
-    def create_historical_positions(self, input_frames: List[Tuple], traffic_direction: int) -> str:
+    def create_historical_positions(self, input_frames: List[Tuple]) -> str:
         """Create 5 historical positions from [-4s, -2s] period at 0.4s intervals"""
         positions = []
 
@@ -117,29 +77,19 @@ Output:
 
         # Use the LAST frame as reference point (current position at -2s before crossing)
         reference_frame = padded_frames[-1]
-        ref_x = reference_frame[self.X_POSITION]  # HighD coordinates (meters)
-        ref_y = reference_frame[self.Y_POSITION]  # HighD coordinates (meters)
+        ref_x = reference_frame[self.X_POSITION]
+        ref_y = reference_frame[self.Y_POSITION]
 
         for i in range(5):
             frame_idx = i * 10  # 0, 10, 20, 30, 40 (every 0.4s)
             frame = padded_frames[frame_idx]
 
-            # Get raw positions in HighD coordinates
+            # Simple coordinate calculation (no transformations needed)
             raw_x = frame[self.X_POSITION]
             raw_y = frame[self.Y_POSITION]
 
-            # Calculate relative movement in vehicle-centric coordinates
-            # For LC-LLM: X = forward direction, Y = lateral direction
-
-            if traffic_direction == 1:  # Top lanes (going left in HighD)
-                # In HighD top lanes: negative X = forward movement
-                # Transform to LC-LLM coordinates where positive X = forward
-                rel_x = ref_x - raw_x  # Forward movement (negative HighD X becomes positive)
-                rel_y = raw_y - ref_y  # Lateral movement (positive = left)
-            else:  # Bottom lanes (going right in HighD)
-                # In HighD bottom lanes: positive X = forward movement
-                rel_x = raw_x - ref_x  # Forward movement
-                rel_y = raw_y - ref_y  # Lateral movement (positive = left)
+            rel_x = raw_x - ref_x  # Forward movement
+            rel_y = raw_y - ref_y  # Lateral movement
 
             positions.append(f"({rel_x:.2f},{rel_y:.2f})")
 
@@ -148,7 +98,6 @@ Output:
     def create_surrounding_vehicles_info(self, current_frame: Tuple) -> List[str]:
         """Create surrounding vehicle info using ONLY distance data"""
         surrounding_info = []
-
         distance_threshold = 200  # meters
 
         # Ahead vehicle
@@ -189,17 +138,18 @@ Output:
 
         return surrounding_info
 
-    def generate_notable_features(self, current_frame: Tuple, lane_position: str, traffic_direction: int) -> List[str]:
+    def generate_notable_features(self, current_frame: Tuple, lane_position: str) -> List[str]:
         """Generate notable features based on vehicle state"""
         features = []
 
-        # Get corrected velocities
-        vx_ms, vy_ms = self.get_corrected_velocities(current_frame, traffic_direction)
-        vx_kmh = abs(vx_ms) * 3.6  # Use absolute value for speed
-        vy_kmh = vy_ms * 3.6
+        # Extract velocities directly (no transformation needed)
+        vx_ms = current_frame[self.X_VELOCITY]
+        vy_ms = current_frame[self.Y_VELOCITY]
+        vx_kmh = abs(vx_ms) * 3.6  # Speed (always positive)
+        vy_kmh = vy_ms * 3.6  # Lateral velocity (can be negative)
 
-        # Lateral movement (reliable indicator)
-        if abs(vy_kmh) > 2.0:  # Significant lateral movement
+        # ✅ CORRECTED: Lateral movement threshold changed to 0.5 km/h
+        if abs(vy_kmh) > 0.5:  # Significant lateral movement
             direction = "left" if vy_kmh > 0 else "right"
             features.append(
                 f"Notable feature: Significant lateral movement detected ({direction}ward at {abs(vy_kmh):.1f} km/h).")
@@ -271,34 +221,30 @@ Output:
             else:
                 return "Right lane change maneuver"
 
-    def extract_ground_truth_trajectory(self, future_frames: List[Tuple], reference_frame: Tuple,
-                                        traffic_direction: int) -> str:
+    def extract_ground_truth_trajectory(self, features_sequence: List[Tuple], boundary_frame: int = 100) -> str:
         """Extract actual future trajectory from ground truth data [0s, 4s] at 1s intervals"""
         trajectory_points = []
 
-        # Reference position at crossing time (should be (0,0) in relative coordinates)
+        # Reference position at crossing time (frame 100)
+        reference_frame = features_sequence[boundary_frame]
         ref_x = reference_frame[self.X_POSITION]
         ref_y = reference_frame[self.Y_POSITION]
 
-        # Future frames cover [0s, 4s] = 100 frames at 25 Hz
-        # Sample at 1s intervals = every 25 frames: frames 24, 49, 74, 99
-        sample_indices = [24, 49, 74, 99]  # 1s, 2s, 3s, 4s
+        # Future frames: boundary_frame + [25, 50, 75, 99] (1s, 2s, 3s, 4s intervals)
+        sample_offsets = [25, 50, 75, 99]  # 1s, 2s, 3s, 4s
 
-        for i, frame_idx in enumerate(sample_indices):
-            if frame_idx < len(future_frames):
-                future_frame = future_frames[frame_idx]
+        for offset in sample_offsets:
+            future_idx = boundary_frame + offset
+            if future_idx < len(features_sequence):
+                future_frame = features_sequence[future_idx]
 
                 # Get raw future position
                 raw_x = future_frame[self.X_POSITION]
                 raw_y = future_frame[self.Y_POSITION]
 
-                # Transform to vehicle-centric coordinates (same logic as historical)
-                if traffic_direction == 1:  # Top lanes (going left in HighD)
-                    rel_x = ref_x - raw_x  # Forward movement
-                    rel_y = raw_y - ref_y  # Lateral movement
-                else:  # Bottom lanes (going right in HighD)
-                    rel_x = raw_x - ref_x  # Forward movement
-                    rel_y = raw_y - ref_y  # Lateral movement
+                # Simple coordinate calculation (no transformation needed)
+                rel_x = raw_x - ref_x
+                rel_y = raw_y - ref_y
 
                 trajectory_points.append(f"({rel_x:.2f},{rel_y:.2f})")
             else:
@@ -318,15 +264,12 @@ Output:
         return "[" + ", ".join(trajectory_points[:4]) + "]"
 
     def convert_sample_to_lcllm_format(self, features_sequence: List[Tuple], direction_labels: List[int]) -> Dict:
-        """Convert trajectory sample to LC-LLM format with HighD awareness"""
+        """Convert trajectory sample to LC-LLM format (Pure CoT)"""
 
         if len(features_sequence) != 200:
             raise ValueError(f"Expected 200 frames, got {len(features_sequence)}")
 
-        # Determine traffic direction from velocity pattern
-        traffic_direction = self.determine_traffic_direction(features_sequence)
-
-        crossing_idx = 100  # Frame 100 is crossing time
+        boundary_frame = 100
 
         # Input period: [-4s, -2s] = frames 0-49 (first 50 frames)
         input_frames = features_sequence[:50]
@@ -334,14 +277,8 @@ Output:
         # Current frame: last frame of input period (at -2s)
         current_frame = input_frames[-1]  # Frame 49
 
-        # Reference frame: at crossing time (frame 100)
-        reference_frame = features_sequence[crossing_idx]
-
-        # Future period: [0s, 4s] = frames 100-199
-        future_frames = features_sequence[crossing_idx:]
-
         # Determine intention from future period labels
-        future_labels = direction_labels[crossing_idx:]
+        future_labels = direction_labels[boundary_frame:]
         if future_labels:
             intention = max(set(future_labels), key=future_labels.count)
         else:
@@ -350,9 +287,10 @@ Output:
         # Generate scenario components
         lane_position, lane_count = self.determine_lane_configuration(current_frame)
 
-        # Vehicle information (get corrected velocities)
+        # Vehicle information (extract directly from data)
         car_type = "Car" if current_frame[self.CAR_TYPE] > 0 else "Truck"
-        vx_ms, vy_ms = self.get_corrected_velocities(current_frame, traffic_direction)
+        vx_ms = current_frame[self.X_VELOCITY]
+        vy_ms = current_frame[self.Y_VELOCITY]
         vx_kmh = abs(vx_ms) * 3.6  # Speed (always positive)
         vy_kmh = vy_ms * 3.6  # Lateral velocity (can be negative)
         ax = current_frame[self.X_ACCELERATION]
@@ -365,11 +303,11 @@ Output:
             width, length = 2.5, np.random.uniform(12.0, 22.0)
 
         # Generate components
-        historical_positions = self.create_historical_positions(input_frames, traffic_direction)
+        historical_positions = self.create_historical_positions(input_frames)
         surrounding_vehicles = self.create_surrounding_vehicles_info(current_frame)
-        notable_features = self.generate_notable_features(current_frame, lane_position, traffic_direction)
+        notable_features = self.generate_notable_features(current_frame, lane_position)
         potential_behavior = self.determine_potential_behavior(current_frame, intention, lane_position)
-        future_trajectory = self.extract_ground_truth_trajectory(future_frames, reference_frame, traffic_direction)
+        future_trajectory = self.extract_ground_truth_trajectory(features_sequence, boundary_frame)
 
         # Create scenario description
         lane_description = f"a {lane_count}-lane highway" if lane_count > 1 else "highway"
@@ -405,14 +343,14 @@ Final Answer:
 
 
 def main():
-    """Convert your HighD pickle data to LC-LLM format"""
+    """Convert HighD pickle data to LC-LLM format (Pure CoT)"""
     import pickle
     import glob
     import os
 
-    converter = FixedLCLLMDataConverter()
+    converter = CorrectedLCLLMDataConverter()
 
-    # Process your data from output_4sbefore_4safter
+    # Process data from output_4sbefore_4safter
     data_dir = "output_4sbefore_4safter"
     if not os.path.exists(data_dir):
         print(f"Error: Directory {data_dir} not found!")

@@ -1,6 +1,9 @@
 from read_data import *
 import random
 
+
+''''IMPORTANT: in this script, all the trajectories after extraction are moving into positive X-axis direction. And negative
+Y-axis movment means Right change, positives meand left lane change'''
 # HighD frame_rate= 25 Hz
 FRAME_TAKEN = 200  # 8 seconds total (4 before + 4 after boundary crossing)
 FRAME_BEFORE = 100  # 4 seconds before boundary crossing
@@ -128,27 +131,32 @@ def run(number):
         # We need to consider the fact that right/left are different for top/bottom lanes.
         # top lanes are going left      <----
         # bottom lanes are going right  ---->
-        # left -> negative, right -> positive
+        # left -> positive, right -> negative
         car_center = tracks_csv[i][Y][frame_num] + tracks_meta[i][HEIGHT] / 2
         if going == 1:
             cur_feature["delta_y"] = car_center - \
                 lanes_info[original_lane] - lane_width/2  # up
-            cur_feature["y_velocity"] = -tracks_csv[i][Y_VELOCITY][frame_num]
-            cur_feature["y_acceleration"] = - \
+            cur_feature["y_velocity"] = tracks_csv[i][Y_VELOCITY][frame_num]
+            cur_feature["y_acceleration"] =  \
                 tracks_csv[i][Y_ACCELERATION][frame_num]
+            # the position of the ego vehicle:
+            cur_feature["x_position"] = -tracks_csv[i][X][frame_num]
+            cur_feature["y_position"] = tracks_csv[i][Y][frame_num]
+            cur_feature["x_velocity"] = -tracks_csv[i][X_VELOCITY][frame_num]
+            cur_feature["x_acceleration"] = -tracks_csv[i][X_ACCELERATION][frame_num]
         else:
             cur_feature["delta_y"] = lanes_info[original_lane] - \
                 car_center + lane_width/2  # down
-            cur_feature["y_velocity"] = tracks_csv[i][Y_VELOCITY][frame_num]
-            cur_feature["y_acceleration"] = tracks_csv[i][Y_ACCELERATION][frame_num]
+            cur_feature["y_velocity"] = -tracks_csv[i][Y_VELOCITY][frame_num]
+            cur_feature["y_acceleration"] = -tracks_csv[i][Y_ACCELERATION][frame_num]
+            # the position of the ego vehicle:
+            cur_feature["x_position"] = tracks_csv[i][X][frame_num]
+            cur_feature["y_position"] = -tracks_csv[i][Y][frame_num]
+            cur_feature["x_velocity"] = tracks_csv[i][X_VELOCITY][frame_num]
+            cur_feature["x_acceleration"] = tracks_csv[i][X_ACCELERATION][frame_num]
 
-        cur_feature["x_velocity"] = tracks_csv[i][X_VELOCITY][frame_num]
-        cur_feature["x_acceleration"] = tracks_csv[i][X_ACCELERATION][frame_num]
         cur_feature["car_type"] = 1 if tracks_meta[i][CLASS] == "Car" else -1
 
-        # the position of the ego vehicle:
-        cur_feature["x_position"] = tracks_csv[i][X][frame_num]
-        cur_feature["y_position"] = tracks_csv[i][Y][frame_num]
 
         def calculate_distance(target_car_id):
             """
@@ -265,9 +273,13 @@ def run(number):
 
     change_num = len(result)
 
-    if len(lane_keeping_ids) > len(result):
-        # make the lane keeping size the same as lane changing
-        lane_keeping_ids = random.sample(lane_keeping_ids, len(result))
+    # Define the desired number of lane-keeping samples
+    lk_sample_size = 2 * change_num
+
+    # Check if you have enough lane-keeping cars to sample from
+    if len(lane_keeping_ids) >= lk_sample_size:
+        # Sample twice the number of lane-changing events
+        lane_keeping_ids = random.sample(lane_keeping_ids, lk_sample_size)
 
     for i in lane_keeping_ids:
         cur_change = []

@@ -11,38 +11,48 @@ warnings.filterwarnings('ignore')
 
 
 # -------------------- MODEL DEFINITION --------------------
-def sam_deceleration_model(t, W, D):
+def sam_model_with_v0(t, W, D, v0):
     """
-    Flexible Half-Sine SAM Model for the post-boundary (deceleration) segment.
-    This model fits both W (displacement) and D (duration) as independent parameters.
-    The model uses the first quarter-cycle of a sine wave: y(t) = W * sin(πt / 2D)
+    Modified Sinusoidal Acceleration Model (SAM) with known initial velocity v0
+    Based on standard SAM but adjusted for non-zero initial velocity
+
+    Derivation:
+    - Standard SAM assumes v(0) = 0, but post-boundary trajectories have v(0) = v0
+    - Modified to ensure: y(0) = 0, v(0) = v0, y(D) = W
+
+    Mathematical formulation:
+    y(t) = (W/D)*t + ((v0*D - W)/(2π))*sin(2πt/D)
+
+    Parameters:
+    - W: Total lateral displacement
+    - D: Duration of lane change
+    - v0: Initial lateral velocity (extracted from trajectory data at boundary)
+    - t: Time since lane change start
     """
-    if D <= 0:
-        return np.inf  # Prevent division by zero or invalid domain
-    return W * np.sin((np.pi * t) / (2 * D))
+    return (W / D) * t + ((v0 * D - W) / (2 * np.pi)) * np.sin(2 * np.pi * t / D)
 
 
 # -------------------- FITTING FUNCTION --------------------
 def fit_sam_to_trajectory(trajectory_data, directions, traj_idx=0, filename=""):
     """
-    Fits the Half-Sine SAM model to the post-lane-change trajectory data.
+    Fits the SAM model with initial velocity to the post-lane-change trajectory data.
     """
     # Basic validation of the trajectory data structure
     if len(trajectory_data) != 200:
         return None
 
-    # Determine the direction of the lane change (1 for LEFT, 2 for RIGHT)
+    # Use the provided direction labels (1=LEFT, 2=RIGHT, 0=LANE_KEEPING)
     direction = directions[100] if len(directions) > 100 else directions[0]
     if direction not in [1, 2]:
-        return None  # Not a lane change trajectory
+        return None  # Skip lane keeping trajectories (direction = 0)
 
-    # Extract relevant data columns
-    delta_y = np.array([frame[2] for frame in trajectory_data])
-    y_velocities = np.array([frame[3] for frame in trajectory_data])
+    # Extract relevant data columns using correct feature indices
+    delta_y = np.array([frame[2] for frame in trajectory_data])  # Index 2: ΔY (difference from lane center)
+    y_velocities = np.array([frame[3] for frame in trajectory_data])  # Index 3: Vy (Y velocity)
 
     # Isolate the post-lane-change segment (the last 4 seconds / 100 frames)
     boundary_frame = 100
-    v0 = y_velocities[boundary_frame]
+    v0 = y_velocities[boundary_frame]  # Extract initial velocity at boundary crossing
     post_boundary_y = delta_y[boundary_frame:]
     delta_y_at_boundary = delta_y[boundary_frame]
 
@@ -55,25 +65,31 @@ def fit_sam_to_trajectory(trajectory_data, directions, traj_idx=0, filename=""):
     if abs(post_displacement) < 0.3:
         return None
 
-    # --- Fit the SAM Model ---
+    # --- Fit the SAM Model with v0 ---
     try:
-        # Initial guess for [W, D]: Use actual displacement for W, and 4.0s for D
-        p0_sam = [post_displacement, 4.0]
+        # Initial guess for [W, D, v0]: Use actual displacement for W, 4.0s for D, extracted v0
+        p0_sam = [post_displacement, 4.0, v0]
 
-        # Define bounds to guide the fitter.
-        # W (total displacement) should be reasonably close to the observed displacement.
-        # D (duration) is the time to complete the maneuver, bounded between 2s and 8s.
-        if post_displacement > 0:  # Left lane change
-            bounds_sam = ([post_displacement * 0.5, 2.0], [post_displacement * 1.5, 8.0])
-        else:  # Right lane change
-            bounds_sam = ([post_displacement * 1.5, 2.0], [post_displacement * 0.5, 8.0])
+        # Define bounds to guide the fitter for [W, D, v0]
+        v0_tolerance = max(abs(v0) * 1, 1)  # Allow ±100% variation or minimum 1 m/s
 
-        # Perform the curve fitting
-        popt_sam, _ = curve_fit(sam_deceleration_model, t_post, y_relative,
+        if post_displacement > 0:  # Left lane change (positive y)
+            bounds_sam = (
+                [post_displacement * 0, 1.0, v0 - v0_tolerance],
+                [post_displacement * 3, 12.0, v0 + v0_tolerance]
+            )
+        else:  # Right lane change (negative y)
+            bounds_sam = (
+                [post_displacement * 3, 1.0, v0 - v0_tolerance],
+                [post_displacement * 0, 12.0, v0 + v0_tolerance]
+            )
+
+        # Perform the curve fitting using the correct SAM model
+        popt_sam, _ = curve_fit(sam_model_with_v0, t_post, y_relative,
                                 p0=p0_sam, bounds=bounds_sam, maxfev=10000)
 
-        W_fitted, D_fitted = popt_sam
-        y_fitted_sam = sam_deceleration_model(t_post, W_fitted, D_fitted)
+        W_fitted, D_fitted, v0_fitted = popt_sam
+        y_fitted_sam = sam_model_with_v0(t_post, W_fitted, D_fitted, v0_fitted)
 
         # Calculate performance metrics
         r2 = r2_score(y_relative, y_fitted_sam)
@@ -83,19 +99,21 @@ def fit_sam_to_trajectory(trajectory_data, directions, traj_idx=0, filename=""):
         if r2 < 0.85:
             return None
 
-        # Store results in a dictionary
+        # Store results in a dictionary - use the provided direction labels directly
         results = {
             'traj_idx': traj_idx, 'filename': filename,
-            'direction': "LEFT" if direction == 1 else "RIGHT",
-            'v0': v0, 'post_displacement': post_displacement,
+            'direction': "LEFT" if direction == 1 else "RIGHT",  # Direct label mapping
+            'direction_label': direction,  # Store the original numeric label too
+            'v0_extracted': v0, 'v0_fitted': v0_fitted,
+            'post_displacement': post_displacement,
             'y_relative': y_relative, 't_post': t_post,
-            'sam_W': W_fitted, 'sam_D': D_fitted,
+            'sam_W': W_fitted, 'sam_D': D_fitted, 'sam_v0': v0_fitted,
             'sam_fitted': y_fitted_sam,
             'sam_r2': r2, 'sam_rmse': rmse
         }
         return results
 
-    except Exception:
+    except Exception as e:
         # If fitting fails for any reason, return None
         return None
 
@@ -103,7 +121,7 @@ def fit_sam_to_trajectory(trajectory_data, directions, traj_idx=0, filename=""):
 # -------------------- VISUALIZATION --------------------
 def visualize_best_fits(fits, n_plots=6):
     """
-    Visualizes the top N best fits for the SAM model.
+    Visualizes the top N best fits for the SAM model with v0.
     """
     if not fits:
         print("No successful fits to visualize.")
@@ -121,7 +139,7 @@ def visualize_best_fits(fits, n_plots=6):
         # --- Plot 1: Trajectory Fit ---
         ax1 = axes[0, i]
         ax1.plot(fit['t_post'], fit['y_relative'], 'b.', alpha=0.6, markersize=4, label='Actual Data')
-        ax1.plot(fit['t_post'], fit['sam_fitted'], 'r-', linewidth=2.5, label='SAM Fit')
+        ax1.plot(fit['t_post'], fit['sam_fitted'], 'r-', linewidth=2.5, label='SAM w/ v₀ Fit')
 
         title_text = f"{fit['direction']} | R²={fit['sam_r2']:.3f}"
         ax1.set_title(title_text, fontsize=10)
@@ -140,12 +158,15 @@ def visualize_best_fits(fits, n_plots=6):
         ax2.grid(True, linestyle='--', alpha=0.4)
         ax2.legend(fontsize=8)
 
-        # Add a text box with key parameters
-        param_text = f'v₀={fit["v0"]:.2f} m/s\nΔy={fit["post_displacement"]:.2f} m\nW={fit["sam_W"]:.2f}, D={fit["sam_D"]:.2f}'
+        # Add a text box with key parameters including v0 comparison
+        param_text = (f'v₀ ext={fit["v0_extracted"]:.2f} m/s\n'
+                      f'v₀ fit={fit["v0_fitted"]:.2f} m/s\n'
+                      f'Δy={fit["post_displacement"]:.2f} m\n'
+                      f'W={fit["sam_W"]:.2f}, D={fit["sam_D"]:.2f}')
         ax2.text(0.05, 0.95, param_text, transform=ax2.transAxes, fontsize=8,
                  verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
 
-    plt.suptitle(f'Top {n_vis} Half-Sine SAM Model Fits Across All Files', fontsize=16, y=1.02)
+    plt.suptitle(f'Top {n_vis} SAM Model with v₀ Fits Across All Files', fontsize=16, y=1.02)
     plt.tight_layout()
     plt.show()
 
@@ -153,7 +174,7 @@ def visualize_best_fits(fits, n_plots=6):
 # -------------------- MAIN ANALYSIS SCRIPT --------------------
 def run_analysis_on_all_files(data_directory):
     """
-    Main function to load all data files, run the SAM fit, and report results.
+    Main function to load all data files, run the SAM fit with v0, and report results.
     """
     # Find all result*.pickle files in the specified directory
     pickle_files = sorted(glob.glob(os.path.join(data_directory, 'result*.pickle')))
@@ -208,35 +229,61 @@ def run_analysis_on_all_files(data_directory):
     success_rate = (num_successful_fits / total_lc_trajectories) * 100 if total_lc_trajectories > 0 else 0
 
     print(f"Total Lane Change Trajectories Found: {total_lc_trajectories}")
-    print(f"Total Successful SAM Fits (R² > 0.85): {num_successful_fits}")
+    print(f"Total Successful SAM w/ v₀ Fits (R² > 0.85): {num_successful_fits}")
     print(f"Overall Model Success Rate: {success_rate:.2f}%\n")
 
     # Performance metrics
     all_r2 = [f['sam_r2'] for f in all_fits]
     all_rmse = [f['sam_rmse'] for f in all_fits]
 
-    print("SAM Model Performance Statistics:")
+    print("SAM Model with v₀ Performance Statistics:")
     print(f"  Mean R²:   {np.mean(all_r2):.4f} (± {np.std(all_r2):.4f})")
     print(f"  Mean RMSE: {np.mean(all_rmse):.4f} m (± {np.std(all_rmse):.4f})\n")
 
-    # Parameter analysis
+    # Parameter analysis including v0
     all_W = [f['sam_W'] for f in all_fits]
     all_D = [f['sam_D'] for f in all_fits]
+    all_v0_extracted = [f['v0_extracted'] for f in all_fits]
+    all_v0_fitted = [f['v0_fitted'] for f in all_fits]
+
     print("Fitted Parameter Statistics:")
-    print(f"  Mean W (Amplitude): {np.mean(all_W):.3f} m (± {np.std(all_W):.3f})")
-    print(f"  Mean D (Duration):  {np.mean(all_D):.3f} s (± {np.std(all_D):.3f})\n")
+    print(f"  Mean W (Displacement): {np.mean(all_W):.3f} m (± {np.std(all_W):.3f})")
+    print(f"  Mean D (Duration):     {np.mean(all_D):.3f} s (± {np.std(all_D):.3f})")
+    print(f"  Mean v₀ extracted:     {np.mean(all_v0_extracted):.3f} m/s (± {np.std(all_v0_extracted):.3f})")
+    print(f"  Mean v₀ fitted:        {np.mean(all_v0_fitted):.3f} m/s (± {np.std(all_v0_fitted):.3f})")
+
+    # v0 correlation analysis
+    v0_diff = np.array(all_v0_fitted) - np.array(all_v0_extracted)
+    print(f"  v₀ difference (fit-ext): {np.mean(v0_diff):.3f} m/s (± {np.std(v0_diff):.3f})\n")
+
+    # Direction analysis
+    left_fits = [f for f in all_fits if f['direction'] == 'LEFT']
+    right_fits = [f for f in all_fits if f['direction'] == 'RIGHT']
+    print("Direction-specific Analysis:")
+    print(f"  Left lane changes:  {len(left_fits)} ({len(left_fits) / len(all_fits) * 100:.1f}%)")
+    print(f"  Right lane changes: {len(right_fits)} ({len(right_fits) / len(all_fits) * 100:.1f}%)")
+
+    if left_fits:
+        left_r2 = np.mean([f['sam_r2'] for f in left_fits])
+        print(f"  Left LC mean R²: {left_r2:.4f}")
+    if right_fits:
+        right_r2 = np.mean([f['sam_r2'] for f in right_fits])
+        print(f"  Right LC mean R²: {right_r2:.4f}")
 
     # --- Conclusion ---
-    print("--- Conclusion ---")
+    print("\n--- Conclusion ---")
     if np.mean(all_r2) > 0.95 and success_rate > 50:
-        print("✅ The Half-Sine SAM demonstrates an EXCELLENT fit for a majority of the observed")
+        print("✅ The SAM model with v₀ demonstrates an EXCELLENT fit for a majority of the observed")
         print("   lane change deceleration profiles, consistently yielding high R² values.")
     elif np.mean(all_r2) > 0.90 and success_rate > 30:
-        print("✅ The Half-Sine SAM provides a a NICE FIT for a significant portion of the trajectories.")
-        print("   It appears to be a robust model for this type of motion.")
+        print("✅ The SAM model with v₀ provides a GOOD FIT for a significant portion of the trajectories.")
+        print("   It appears to be a robust model for post-boundary lane change motion.")
     else:
-        print("⚠️ The Half-Sine SAM provides a moderate fit. While successful in many cases,")
+        print("⚠️ The SAM model with v₀ provides a moderate fit. While successful in many cases,")
         print(f"   its applicability may be limited, as shown by the success rate of {success_rate:.2f}%.")
+
+    print(f"\n📊 Key insight: The model incorporating initial velocity v₀ should better capture")
+    print(f"   the non-zero lateral momentum that vehicles have when crossing the lane boundary.")
 
     # Visualize the best results from the entire dataset
     visualize_best_fits(all_fits, n_plots=6)

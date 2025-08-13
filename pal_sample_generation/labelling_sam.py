@@ -1,28 +1,21 @@
 #!/usr/bin/env python3
 """
-Fixed LC-LLM Data Converter - HighD Dataset Aware
-FIXES:
-1. Handles HighD coordinate system (top lanes going left, bottom lanes going right)
-2. Corrects velocity interpretation (accounts for sign flips)
-3. Uses proper reference frames for position calculation
-4. Handles realistic highway driving scenarios
-5. ✅ CORRECTED FEATURE INDICES to match updated data processing script
+Corrected LC-LLM Data Converter - SAM Fitting Approach with Delta_Vx and Fitting Statistics
+ADDITIONS:
+1. Delta_Vx calculation for lane change samples (vx[8s] - vx[2s])
+2. SAM fitting R² tracking and success rate statistics
 """
 
 import json
 import numpy as np
 from typing import List, Tuple, Dict
-
 from scipy.optimize import curve_fit
+
 
 def sam_model_with_v0(t, W, D, v0):
     """
     Modified Sinusoidal Acceleration Model (SAM) with known initial velocity v0
     Based on standard SAM but adjusted for non-zero initial velocity
-
-    Derivation:
-    - Standard SAM assumes v(0) = 0, but post-boundary trajectories have v(0) = v0
-    - Modified to ensure: y(0) = 0, v(0) = v0, y(D) = W
 
     Mathematical formulation:
     y(t) = (W/D)*t + ((v0*D - W)/(2π))*sin(2πt/D)
@@ -36,17 +29,17 @@ def sam_model_with_v0(t, W, D, v0):
     return (W / D) * t + ((v0 * D - W) / (2 * np.pi)) * np.sin(2 * np.pi * t / D)
 
 
-class FixedLCLLMDataConverter:
+class CorrectedLCLLMDataConverter:
     def __init__(self):
-        # ✅ CORRECTED Feature indices to match the updated HighD processing script
+        # Feature indices (from your provided list)
         self.LEFT_LANE_EXIST = 0
         self.RIGHT_LANE_EXIST = 1
         self.DELTA_Y = 2
-        self.Y_VELOCITY = 3        # ✅ CORRECTED: was 5, now 3
-        self.Y_ACCELERATION = 4    # ✅ CORRECTED: was 6, now 4
-        self.X_POSITION = 5        # ✅ CORRECTED: was 3, now 5
-        self.Y_POSITION = 6        # ✅ CORRECTED: was 4, now 6
-        self.X_VELOCITY = 7
+        self.Y_VELOCITY = 3
+        self.Y_ACCELERATION = 4
+        self.X_POSITION = 5
+        self.Y_POSITION = 6
+        self.X_VELOCITY = 7  # This is what we need for Delta_Vx
         self.X_ACCELERATION = 8
         self.CAR_TYPE = 9
         self.PRECEDING_DISTANCE = 10
@@ -57,6 +50,14 @@ class FixedLCLLMDataConverter:
         self.RIGHT_PRECEDING_DISTANCE = 15
         self.RIGHT_ALONGSIDE_DISTANCE = 16
         self.RIGHT_FOLLOWING_DISTANCE = 17
+
+        # SAM fitting statistics tracking
+        self.sam_fitting_stats = {
+            'total_lane_changes': 0,
+            'successful_fits': 0,
+            'r2_values': [],
+            'failed_fits': 0
+        }
 
         # System message (exact format from LC-LLM paper)
         self.SYSTEM_MESSAGE = """Role: You are an expert driving prediction model of an autonomous driving system, that can predict the future driving intention and future 4-second driving trajectory for a given target vehicle, avoiding collision with other vehicles and obstacles on the road.
@@ -72,46 +73,6 @@ Output:
   - Trajectory (MOST IMPORTANT): 4 points, one every 1 second
   - [(x1,y1), (x2,y2), (x3,y3), (x4,y4)]"""
 
-    def determine_traffic_direction(self, features_sequence: List[Tuple]) -> int:
-        """Determine traffic direction from X velocity pattern"""
-        # Sample a few frames to determine overall direction
-        sample_frames = features_sequence[::10]  # Every 10th frame
-        x_velocities = [frame[self.X_VELOCITY] for frame in sample_frames]
-        avg_x_velocity = np.mean(x_velocities)
-
-        # In HighD:
-        # going = 1 (top lanes): moving leftward, X velocity should be negative
-        # going = 2 (bottom lanes): moving rightward, X velocity should be positive
-        if avg_x_velocity < 0:
-            return 1  # Top lanes, going left
-        else:
-            return 2  # Bottom lanes, going right
-
-    def get_corrected_velocities(self, frame: Tuple, traffic_direction: int) -> Tuple[float, float]:
-        """Get corrected velocities accounting for HighD coordinate system"""
-        x_vel = frame[self.X_VELOCITY]  # m/s
-        y_vel = frame[self.Y_VELOCITY]  # m/s (potentially sign-flipped)
-
-        # The Y velocity was negated for top lanes in your processing script
-        # We need to understand what this means for lane change interpretation
-
-        # For LC-LLM format, we want:
-        # - Positive Y velocity = moving toward left lane
-        # - Negative Y velocity = moving toward right lane
-
-        if traffic_direction == 1:  # Top lanes (going left)
-            # Y velocity was negated, so we need to interpret it correctly
-            # In HighD top lanes: positive Y = moving toward bottom of screen
-            # For lane changes: positive Y should mean moving to left lane
-            corrected_y_vel = y_vel  # Keep as processed (already negated in script)
-        else:  # Bottom lanes (going right)
-            # Y velocity normal
-            # In HighD bottom lanes: positive Y = moving toward top of screen
-            # For lane changes: positive Y should mean moving to left lane
-            corrected_y_vel = y_vel
-
-        return x_vel, corrected_y_vel
-
     def determine_lane_configuration(self, current_frame: Tuple) -> Tuple[str, int]:
         """Determine lane position and total lanes"""
         left_exists = current_frame[self.LEFT_LANE_EXIST] > 0.5
@@ -126,7 +87,7 @@ Output:
         else:
             return "single", 1  # Single lane (rare)
 
-    def create_historical_positions(self, input_frames: List[Tuple], traffic_direction: int) -> str:
+    def create_historical_positions(self, input_frames: List[Tuple]) -> str:
         """Create 5 historical positions from [-4s, -2s] period at 0.4s intervals"""
         positions = []
 
@@ -139,38 +100,27 @@ Output:
 
         # Use the LAST frame as reference point (current position at -2s before crossing)
         reference_frame = padded_frames[-1]
-        ref_x = reference_frame[self.X_POSITION]  # HighD coordinates (meters)
-        ref_y = reference_frame[self.Y_POSITION]  # HighD coordinates (meters)
+        ref_x = reference_frame[self.X_POSITION]
+        ref_y = reference_frame[self.Y_POSITION]
 
         for i in range(5):
             frame_idx = i * 10  # 0, 10, 20, 30, 40 (every 0.4s)
             frame = padded_frames[frame_idx]
 
-            # Get raw positions in HighD coordinates
+            # Calculate relative movement (no coordinate transformation needed)
             raw_x = frame[self.X_POSITION]
             raw_y = frame[self.Y_POSITION]
 
-            # Calculate relative movement in vehicle-centric coordinates
-            # For LC-LLM: X = forward direction, Y = lateral direction
-
-            if traffic_direction == 1:  # Top lanes (going left in HighD)
-                # In HighD top lanes: negative X = forward movement
-                # Transform to LC-LLM coordinates where positive X = forward
-                rel_x = ref_x - raw_x  # Forward movement (negative HighD X becomes positive)
-                rel_y = raw_y - ref_y  # Lateral movement (positive = left)
-            else:  # Bottom lanes (going right in HighD)
-                # In HighD bottom lanes: positive X = forward movement
-                rel_x = raw_x - ref_x  # Forward movement
-                rel_y = raw_y - ref_y  # Lateral movement (positive = left)
+            rel_x = raw_x - ref_x  # Forward movement
+            rel_y = raw_y - ref_y  # Lateral movement
 
             positions.append(f"({rel_x:.2f},{rel_y:.2f})")
 
         return ", ".join(positions)
 
     def create_surrounding_vehicles_info(self, current_frame: Tuple) -> List[str]:
-        """Create surrounding vehicle info using ONLY distance data"""
+        """Create surrounding vehicle info using distance data"""
         surrounding_info = []
-
         distance_threshold = 200  # meters
 
         # Ahead vehicle
@@ -211,17 +161,18 @@ Output:
 
         return surrounding_info
 
-    def generate_notable_features(self, current_frame: Tuple, lane_position: str, traffic_direction: int) -> List[str]:
+    def generate_notable_features(self, current_frame: Tuple, lane_position: str) -> List[str]:
         """Generate notable features based on vehicle state"""
         features = []
 
-        # Get corrected velocities
-        vx_ms, vy_ms = self.get_corrected_velocities(current_frame, traffic_direction)
-        vx_kmh = abs(vx_ms) * 3.6  # Use absolute value for speed
-        vy_kmh = vy_ms * 3.6
+        # Extract velocities directly (no transformation needed)
+        vx_ms = current_frame[self.X_VELOCITY]
+        vy_ms = current_frame[self.Y_VELOCITY]
+        vx_kmh = abs(vx_ms) * 3.6  # Speed (always positive)
+        vy_kmh = vy_ms * 3.6  # Lateral velocity (can be negative)
 
         # Lateral movement (reliable indicator)
-        if abs(vy_kmh) > 2.0:  # Significant lateral movement
+        if abs(vy_kmh) > 0.5:  # Significant lateral movement
             direction = "left" if vy_kmh > 0 else "right"
             features.append(
                 f"Notable feature: Significant lateral movement detected ({direction}ward at {abs(vy_kmh):.1f} km/h).")
@@ -293,34 +244,30 @@ Output:
             else:
                 return "Right lane change maneuver"
 
-    def extract_ground_truth_trajectory(self, future_frames: List[Tuple], reference_frame: Tuple,
-                                        traffic_direction: int) -> str:
+    def extract_ground_truth_trajectory(self, features_sequence: List[Tuple], boundary_frame: int = 100) -> str:
         """Extract actual future trajectory from ground truth data [0s, 4s] at 1s intervals"""
         trajectory_points = []
 
-        # Reference position at crossing time (should be (0,0) in relative coordinates)
+        # Reference position at crossing time (frame 100)
+        reference_frame = features_sequence[boundary_frame]
         ref_x = reference_frame[self.X_POSITION]
         ref_y = reference_frame[self.Y_POSITION]
 
-        # Future frames cover [0s, 4s] = 100 frames at 25 Hz
-        # Sample at 1s intervals = every 25 frames: frames 24, 49, 74, 99
-        sample_indices = [24, 49, 74, 99]  # 1s, 2s, 3s, 4s
+        # Future frames: boundary_frame + [25, 50, 75, 100] (1s, 2s, 3s, 4s intervals)
+        sample_offsets = [25, 50, 75, 100]  # 1s, 2s, 3s, 4s
 
-        for i, frame_idx in enumerate(sample_indices):
-            if frame_idx < len(future_frames):
-                future_frame = future_frames[frame_idx]
+        for offset in sample_offsets:
+            future_idx = boundary_frame + offset
+            if future_idx < len(features_sequence):
+                future_frame = features_sequence[future_idx]
 
                 # Get raw future position
                 raw_x = future_frame[self.X_POSITION]
                 raw_y = future_frame[self.Y_POSITION]
 
-                # Transform to vehicle-centric coordinates (same logic as historical)
-                if traffic_direction == 1:  # Top lanes (going left in HighD)
-                    rel_x = ref_x - raw_x  # Forward movement
-                    rel_y = raw_y - ref_y  # Lateral movement
-                else:  # Bottom lanes (going right in HighD)
-                    rel_x = raw_x - ref_x  # Forward movement
-                    rel_y = raw_y - ref_y  # Lateral movement
+                # Calculate relative movement (no coordinate transformation needed)
+                rel_x = raw_x - ref_x
+                rel_y = raw_y - ref_y
 
                 trajectory_points.append(f"({rel_x:.2f},{rel_y:.2f})")
             else:
@@ -339,96 +286,116 @@ Output:
 
         return "[" + ", ".join(trajectory_points[:4]) + "]"
 
-    def fit_sam_to_trajectory(self, trajectory_points: List[Tuple[float, float]], v0: float) -> Tuple[float, float]:
-        """Fit SAM model to trajectory points and return W, D parameters"""
+    def calculate_delta_vx(self, features_sequence: List[Tuple]) -> float:
+        """Calculate change in X velocity from 2s to 8s (frame 50 to frame 199)"""
+        if len(features_sequence) < 200:
+            return 0.0
 
-        # Extract just the lateral (Y) displacements
-        y_positions = [point[1] for point in trajectory_points]
-        y_relative = np.abs(np.array(y_positions) - y_positions[0])
+        # Frame 50 = 2s, Frame 199 = ~8s
+        vx_at_2s = features_sequence[50][self.X_VELOCITY]  # Index 7: X velocity
+        vx_at_8s = features_sequence[199][self.X_VELOCITY]  # Index 7: X velocity
 
-        # Time array (4 points at 1s intervals)
-        time_array = np.array([1.0, 2.0, 3.0, 4.0])
+        delta_vx = vx_at_8s - vx_at_2s  # Change in m/s
+        return delta_vx
 
+    def fit_sam_to_trajectory(self, features_sequence: List[Tuple], direction_labels: List[int]) -> Tuple[
+        float, float, float, float]:
+        """Fit SAM model to trajectory data following working script approach exactly"""
+        """Returns: (W_fitted, D_fitted, v0_fitted, r2_score)"""
+
+        if len(features_sequence) != 200:
+            return 3.0, 4.0, 0.0, 0.0  # Fallback parameters with R²=0
+
+        # Use direction label at boundary crossing (frame 100)
+        direction = direction_labels[100] if len(direction_labels) > 100 else direction_labels[0]
+        if direction not in [1, 2]:
+            return 3.0, 4.0, 0.0, 0.0  # Fallback for lane keeping
+
+        # Track lane change attempts
+        self.sam_fitting_stats['total_lane_changes'] += 1
+
+        # Extract data using correct indices (following working script exactly)
+        delta_y = np.array([frame[self.DELTA_Y] for frame in features_sequence])  # Index 2: ΔY
+        y_velocities = np.array([frame[self.Y_VELOCITY] for frame in features_sequence])  # Index 3: Vy
+
+        # Isolate post-boundary segment (frames 100-199)
+        boundary_frame = 100
+        v0 = y_velocities[boundary_frame]  # Extract initial velocity at boundary crossing
+        post_boundary_y = delta_y[boundary_frame:]
+        delta_y_at_boundary = delta_y[boundary_frame]
+
+        # Normalize data: time starts at 0, displacement starts at 0
+        y_relative = post_boundary_y - delta_y_at_boundary
+        t_post = np.arange(len(y_relative)) / 25.0  # Time in seconds (25 Hz)
+        post_displacement = y_relative[-1]
+
+        # Filter out very small movements
+        if abs(post_displacement) < 0.3:
+            self.sam_fitting_stats['failed_fits'] += 1
+            return 3.0, 4.0, v0, 0.0
+
+        # Fit SAM model (following working script exactly)
         try:
-            # Define fitting function
-            def fit_function(t, W, D):
-                return sam_model_with_v0(t, W, D, abs(v0))
+            # Initial guess
+            p0_sam = [post_displacement, 4.0, v0]
 
-            # Initial guesses
-            initial_W = max(abs(y_positions[-1]), 1.0)  # At least 1m displacement
-            initial_D = 4.0  # Default duration
+            # Set bounds
+            v0_tolerance = max(abs(v0) * 1, 1)
 
-            # Fit with bounds
-            popt, _ = curve_fit(fit_function, time_array, y_relative,
-                                p0=[initial_W, initial_D],
-                                bounds=([0.5, 2.0], [8.0, 8.0]))
+            if post_displacement > 0:  # Left lane change
+                bounds_sam = (
+                    [post_displacement * 0, 1.0, v0 - v0_tolerance],
+                    [post_displacement * 3, 12.0, v0 + v0_tolerance]
+                )
+            else:  # Right lane change
+                bounds_sam = (
+                    [post_displacement * 3, 1.0, v0 - v0_tolerance],
+                    [post_displacement * 0, 12.0, v0 + v0_tolerance]
+                )
 
-            fitted_W, fitted_D = popt
-            return fitted_W, fitted_D
+            # Perform curve fitting
+            popt_sam, _ = curve_fit(sam_model_with_v0, t_post, y_relative,
+                                    p0=p0_sam, bounds=bounds_sam, maxfev=10000)
 
-        except:
-            # Fallback parameters if fitting fails
-            return 3.0, 4.0  # Reasonable defaults
+            W_fitted, D_fitted, v0_fitted = popt_sam
 
-    def extract_trajectory_points_for_fitting(self, future_frames: List[Tuple], reference_frame: Tuple,
-                                              traffic_direction: int) -> List[Tuple[float, float]]:
-        """Extract trajectory points as (x,y) tuples for model fitting"""
+            # Check fit quality
+            y_fitted_sam = sam_model_with_v0(t_post, W_fitted, D_fitted, v0_fitted)
+            from sklearn.metrics import r2_score
+            r2 = r2_score(y_relative, y_fitted_sam)
 
-        ref_x = reference_frame[self.X_POSITION]
-        ref_y = reference_frame[self.Y_POSITION]
+            # Track statistics
+            self.sam_fitting_stats['r2_values'].append(r2)
 
-        trajectory_points = []
-        sample_indices = [24, 49, 74, 99]  # 1s, 2s, 3s, 4s
-
-        for frame_idx in sample_indices:
-            if frame_idx < len(future_frames):
-                future_frame = future_frames[frame_idx]
-                raw_x = future_frame[self.X_POSITION]
-                raw_y = future_frame[self.Y_POSITION]
-
-                # Same coordinate transform as original
-                if traffic_direction == 1:
-                    rel_x = ref_x - raw_x
-                    rel_y = raw_y - ref_y
-                else:
-                    rel_x = raw_x - ref_x
-                    rel_y = raw_y - ref_y
-
-                trajectory_points.append((rel_x, rel_y))
+            # Only return fitted parameters if good fit
+            if r2 > 0.85:
+                self.sam_fitting_stats['successful_fits'] += 1
+                return W_fitted, D_fitted, v0_fitted, r2
             else:
-                # Fallback
-                if trajectory_points:
-                    trajectory_points.append(trajectory_points[-1])
-                else:
-                    trajectory_points.append((0.0, 0.0))
+                self.sam_fitting_stats['failed_fits'] += 1
+                return 3.0, 4.0, v0, r2
 
-        return trajectory_points
+        except Exception as e:
+            # Fallback if fitting fails
+            self.sam_fitting_stats['failed_fits'] += 1
+            return 3.0, 4.0, v0, 0.0
 
     def convert_sample_to_lcllm_format(self, features_sequence: List[Tuple], direction_labels: List[int]) -> Dict:
-        """Convert trajectory sample to LC-LLM format with HighD awareness"""
+        """Convert trajectory sample to LC-LLM format with SAM fitting and Delta_Vx"""
 
         if len(features_sequence) != 200:
             raise ValueError(f"Expected 200 frames, got {len(features_sequence)}")
 
-        # Determine traffic direction from velocity pattern
-        traffic_direction = self.determine_traffic_direction(features_sequence)
+        boundary_frame = 100
 
-        crossing_idx = 100  # Frame 100 is crossing time
-
-        # Input period: [-4s, -2s] = frames 0-49 (first 50 frames)
+        # Input period: [-4s, -2s] = frames 0-49
         input_frames = features_sequence[:50]
 
-        # Current frame: last frame of input period (at -2s)
-        current_frame = input_frames[-1]  # Frame 49
+        # Current frame: last frame of input period
+        current_frame = input_frames[-1]
 
-        # Reference frame: at crossing time (frame 100)
-        reference_frame = features_sequence[crossing_idx]
-
-        # Future period: [0s, 4s] = frames 100-199
-        future_frames = features_sequence[crossing_idx:]
-
-        # Determine intention from future period labels
-        future_labels = direction_labels[crossing_idx:]
+        # Determine intention from boundary frame onward
+        future_labels = direction_labels[boundary_frame:]
         if future_labels:
             intention = max(set(future_labels), key=future_labels.count)
         else:
@@ -437,44 +404,35 @@ Output:
         # Generate scenario components
         lane_position, lane_count = self.determine_lane_configuration(current_frame)
 
-        # Vehicle information (get corrected velocities)
+        # Vehicle information (extract directly from data)
         car_type = "Car" if current_frame[self.CAR_TYPE] > 0 else "Truck"
-        vx_ms, vy_ms = self.get_corrected_velocities(current_frame, traffic_direction)
+        vx_ms = current_frame[self.X_VELOCITY]
+        vy_ms = current_frame[self.Y_VELOCITY]
         vx_kmh = abs(vx_ms) * 3.6  # Speed (always positive)
-        vy_kmh = vy_ms * 3.6  # Lateral velocity (can be negative)
+        vy_kmh = vy_ms * 3.6  # Lateral velocity
         ax = current_frame[self.X_ACCELERATION]
         ay = current_frame[self.Y_ACCELERATION]
 
-        # Vehicle dimensions (reasonable estimates)
+        # Vehicle dimensions
         if car_type == "Car":
             width, length = np.random.uniform(1.8, 2.2), np.random.uniform(4.2, 5.5)
         else:
             width, length = 2.5, np.random.uniform(12.0, 22.0)
 
         # Generate components
-        historical_positions = self.create_historical_positions(input_frames, traffic_direction)
+        historical_positions = self.create_historical_positions(input_frames)
         surrounding_vehicles = self.create_surrounding_vehicles_info(current_frame)
-        notable_features = self.generate_notable_features(current_frame, lane_position, traffic_direction)
+        notable_features = self.generate_notable_features(current_frame, lane_position)
         potential_behavior = self.determine_potential_behavior(current_frame, intention, lane_position)
 
-        # NEW CODE:
+        # Handle trajectory output based on intention
         if intention == 0:  # Keep lane - use original trajectory format
-            future_trajectory = self.extract_ground_truth_trajectory(future_frames, reference_frame, traffic_direction)
+            future_trajectory = self.extract_ground_truth_trajectory(features_sequence, boundary_frame)
             trajectory_output = f'- Trajectory: "{future_trajectory}"'
-        else:  # Lane change - use SAM parameters
-            # Extract trajectory points for fitting
-            trajectory_points = self.extract_trajectory_points_for_fitting(future_frames, reference_frame,
-                                                                           traffic_direction)
-
-            # Get initial velocity at boundary crossing
-            vx_ms, vy_ms = self.get_corrected_velocities(reference_frame, traffic_direction)
-            v0 = abs(vy_ms)  # Initial lateral velocity
-
-            # Fit SAM model
-            fitted_W, fitted_D = self.fit_sam_to_trajectory(trajectory_points, v0)
-
-            # Format parameters
-            trajectory_output = f'- Parameters: "v0={v0:.3f}, W={fitted_W:.2f}, D={fitted_D:.2f}"'
+        else:  # Lane change - use SAM parameters + Delta_Vx
+            fitted_W, fitted_D, fitted_v0, r2_score = self.fit_sam_to_trajectory(features_sequence, direction_labels)
+            delta_vx = self.calculate_delta_vx(features_sequence)
+            trajectory_output = f'- Parameters: "v0={fitted_v0:.3f}, W={fitted_W:.2f}, D={fitted_D:.2f}"\n- Delta_Vx: "{delta_vx:.3f}"'
 
         # Create scenario description
         lane_description = f"a {lane_count}-lane highway" if lane_count > 1 else "highway"
@@ -508,16 +466,42 @@ The information of its surrounding vehicles (within detection range) are listed 
 
         return llama_sample
 
+    def print_sam_fitting_statistics(self):
+        """Print SAM fitting statistics summary"""
+        if self.sam_fitting_stats['total_lane_changes'] == 0:
+            print("\n📊 SAM Fitting Statistics: No lane change samples processed")
+            return
+
+        total = self.sam_fitting_stats['total_lane_changes']
+        successful = self.sam_fitting_stats['successful_fits']
+        failed = self.sam_fitting_stats['failed_fits']
+        success_rate = (successful / total) * 100
+
+        print(f"\n📊 SAM Fitting Statistics:")
+        print(f"Total lane change samples: {total}")
+        print(f"Successful fits (R² > 0.85): {successful}")
+        print(f"Failed fits: {failed}")
+        print(f"Success rate: {success_rate:.1f}%")
+
+        if self.sam_fitting_stats['r2_values']:
+            r2_values = np.array(self.sam_fitting_stats['r2_values'])
+            print(f"R² Statistics:")
+            print(f"  Mean R²: {np.mean(r2_values):.3f}")
+            print(f"  Median R²: {np.median(r2_values):.3f}")
+            print(f"  Std R²: {np.std(r2_values):.3f}")
+            print(f"  Min R²: {np.min(r2_values):.3f}")
+            print(f"  Max R²: {np.max(r2_values):.3f}")
+
 
 def main():
-    """Convert your HighD pickle data to LC-LLM format"""
+    """Convert HighD pickle data to LC-LLM format with SAM fitting and Delta_Vx"""
     import pickle
     import glob
     import os
 
-    converter = FixedLCLLMDataConverter()
+    converter = CorrectedLCLLMDataConverter()
 
-    # Process your data from output_4sbefore_4safter
+    # Process data from output_4sbefore_4safter
     data_dir = "../output_4sbefore_4safter"
     if not os.path.exists(data_dir):
         print(f"Error: Directory {data_dir} not found!")
@@ -559,7 +543,7 @@ def main():
                     continue
 
         total_train_processed += sample_count
-        if i % 10 == 0 or i == len(train_files):  # Progress every 10 files
+        if i % 10 == 0 or i == len(train_files):
             print(f"Training: {i}/{len(train_files)} files ({total_train_processed} samples)")
 
     # Process testing data
@@ -603,14 +587,22 @@ def main():
     print(f"✓ Testing: {len(test_samples)} samples → {test_output_file}")
     print(f"✓ Total: {len(train_samples) + len(test_samples)} samples from {len(pickle_files)} files")
 
+    # Print SAM fitting statistics
+    converter.print_sam_fitting_statistics()
+
     # Show brief example from training data
     if train_samples:
         print(f"\nTraining sample preview:")
         example_text = train_samples[0]["text"]
         if "[/INST]" in example_text:
             input_part = example_text.split("[/INST]")[0].replace("<s>[INST]", "").strip()
+            output_part = example_text.split("[/INST]")[1].replace("</s>", "").strip()
             print(f"Length: {len(example_text)} characters")
             print(f"Input preview: {input_part[:200]}...")
+            if "Delta_Vx" in output_part:
+                print(f"✓ Sample contains Delta_Vx (lane change)")
+            else:
+                print(f"✓ Sample is lane keeping (no Delta_Vx)")
         else:
             print(f"Length: {len(example_text)} characters")
             print(f"Preview: {example_text[:200]}...")
