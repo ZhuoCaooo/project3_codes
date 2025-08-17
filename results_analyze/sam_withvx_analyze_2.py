@@ -212,7 +212,7 @@ def load_and_process_data(sam_results_file: str, ground_truth_file: str) -> Tupl
             continue
 
         gt_response = gt_text.split('[/INST]')[1].replace('</s>', '').strip()
-        gt_trajectory = None
+        gt_trajectory_full = None
 
         trajectory_patterns = [
             r'- Trajectory:\s*"([^"]+)"',
@@ -224,11 +224,11 @@ def load_and_process_data(sam_results_file: str, ground_truth_file: str) -> Tupl
         for pattern in trajectory_patterns:
             match = re.search(pattern, gt_response, re.IGNORECASE)
             if match:
-                gt_trajectory = parse_ground_truth_trajectory(match.group(1))
-                if len(gt_trajectory) == 20:
+                gt_trajectory_full = parse_ground_truth_trajectory(match.group(1))
+                if len(gt_trajectory_full) == 20:
                     break
 
-        if not gt_trajectory or len(gt_trajectory) != 20:
+        if not gt_trajectory_full or len(gt_trajectory_full) != 20:
             continue
 
         # Process predicted trajectory
@@ -240,12 +240,16 @@ def load_and_process_data(sam_results_file: str, ground_truth_file: str) -> Tupl
         vx_ms = vx_kmh / 3.6
 
         predicted_points = None
+        gt_trajectory = None
         point_errors = None
 
-        if pred_intention == 0:  # Lane keeping
+        if pred_intention == 0:  # Lane keeping - only 4 points at [1s, 2s, 3s, 4s]
             pred_4_points = parse_predicted_trajectory(sam_result['prediction'])
             if pred_4_points and len(pred_4_points) == 4:
-                predicted_points = interpolate_4_to_20_points(pred_4_points, time_points)
+                predicted_points = pred_4_points
+                # Extract ground truth at [1s, 2s, 3s, 4s] = indices [4, 9, 14, 19]
+                gt_trajectory = [gt_trajectory_full[4], gt_trajectory_full[9],
+                               gt_trajectory_full[14], gt_trajectory_full[19]]
         else:  # Lane change
             pred_parameters = sam_result['prediction']['parameters']
             if pred_parameters:
@@ -260,10 +264,11 @@ def load_and_process_data(sam_results_file: str, ground_truth_file: str) -> Tupl
                             W=W, D=D, v0_ms=v0, vx_initial_ms=vx_ms,
                             delta_vx_ms=delta_vx, time_points=time_points
                         )
+                        gt_trajectory = gt_trajectory_full
                     except Exception:
                         continue
 
-        if predicted_points:
+        if predicted_points and gt_trajectory:
             point_errors = calculate_point_by_point_errors(predicted_points, gt_trajectory)
 
             # Calculate overall RMSE
