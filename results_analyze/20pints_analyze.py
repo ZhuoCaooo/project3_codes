@@ -156,24 +156,15 @@ class LCLLMAnalyzer20Point:
                 print(f"  Lateral RMSE: {np.mean(lateral_errors):.4f} ± {np.std(lateral_errors):.4f}")
                 print(f"  Longitudinal RMSE: {np.mean(longitudinal_errors):.4f} ± {np.std(longitudinal_errors):.4f}")
 
-            # Print first 5 and last 5 point errors for brevity
-            print(f"  Point-by-point errors (Mean ± Std) - First 5 points:")
-            for i in range(5):
+            # Print all 20 point errors
+            print(f"  Point-by-point errors (Mean ± Std) - All points:")
+            for i in range(20):
                 point_key = f'point_{i + 1}'
                 if point_key in class_stats['point_errors'] and class_stats['point_errors'][point_key]:
                     stats = class_stats['point_errors'][point_key]
                     print(f"    {point_key}: Lat={stats['lateral_mean']:.3f}±{stats['lateral_std']:.3f}, "
-                          f"Lon={stats['longitudinal_mean']:.3f}±{stats['longitudinal_std']:.3f}, "
-                          f"Euc={stats['euclidean_mean']:.3f}±{stats['euclidean_std']:.3f}")
-
-            print(f"  Point-by-point errors (Mean ± Std) - Last 5 points:")
-            for i in range(15, 20):
-                point_key = f'point_{i + 1}'
-                if point_key in class_stats['point_errors'] and class_stats['point_errors'][point_key]:
-                    stats = class_stats['point_errors'][point_key]
-                    print(f"    {point_key}: Lat={stats['lateral_mean']:.3f}±{stats['lateral_std']:.3f}, "
-                          f"Lon={stats['longitudinal_mean']:.3f}±{stats['longitudinal_std']:.3f}, "
-                          f"Euc={stats['euclidean_mean']:.3f}±{stats['euclidean_std']:.3f}")
+                        f"Lon={stats['longitudinal_mean']:.3f}±{stats['longitudinal_std']:.3f}, "
+                        f"Euc={stats['euclidean_mean']:.3f}±{stats['euclidean_std']:.3f}")
 
         self.analysis_results['class_analysis'] = class_analysis
         return class_analysis

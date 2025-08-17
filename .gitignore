@@ -19,3 +19,4 @@ pal_sample_generation/polynomial_fit.py
 pal_sample_generation/mixedmodels_fit.py
 pal_sample_generation/trajectory_fitting_results.csv
 pal_sample_generation/labelling_sam_1.py
+*.png

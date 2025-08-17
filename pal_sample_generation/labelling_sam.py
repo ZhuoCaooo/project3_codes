@@ -254,7 +254,7 @@ Output:
         ref_y = reference_frame[self.Y_POSITION]
 
         # Future frames: boundary_frame + [25, 50, 75, 100] (1s, 2s, 3s, 4s intervals)
-        sample_offsets = [25, 50, 75, 100]  # 1s, 2s, 3s, 4s
+        sample_offsets = [25, 50, 75, 99]
 
         for offset in sample_offsets:
             future_idx = boundary_frame + offset

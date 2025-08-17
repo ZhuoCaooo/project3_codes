@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-FIXED SAM Results Analysis Script
-Compares SAM model predictions with ground truth trajectories from 20-point dataset
-FIXES: Lane keeping handling, ground truth extraction, trajectory reconstruction
+REVISED SAM Results Analysis Script with Temporal Error Analysis
+- LK samples: Direct comparison of 4 predicted points vs 20 GT points
+- LC samples: Temporal analysis of SAM reconstruction errors at each time point
+- Separate analysis for LK vs LC
+- Output folder: sam_analysis_results/
 """
 
 import json
 import numpy as np
 import matplotlib.pyplot as plt
 import re
+import os
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
 import pandas as pd
@@ -29,6 +32,9 @@ class TrajectoryComparison:
     sam_parameters: Optional[Dict] = None
     input_vx_kmh: Optional[float] = None
     delta_vx: Optional[float] = None
+    # New: Store temporal errors
+    lateral_errors_by_time: Optional[List[float]] = None
+    longitudinal_errors_by_time: Optional[List[float]] = None
 
 
 def sam_model_with_v0(t, W, D, v0):
@@ -74,35 +80,15 @@ def reconstruct_sam_trajectory(W: float, D: float, v0_ms: float, vx_initial_ms: 
     return trajectory
 
 
-def reconstruct_lane_keeping_trajectory(vx_initial_ms: float, time_points: List[float]) -> List[Tuple[float, float]]:
-    """
-    Reconstruct lane keeping trajectory (straight line motion)
-    """
-    trajectory = []
-    for t in time_points:
-        x = vx_initial_ms * t  # Constant velocity motion
-        y = 0.0  # No lateral movement for lane keeping
-        trajectory.append((x, y))
-    return trajectory
-
-
 def parse_ground_truth_trajectory(trajectory_str: str) -> List[Tuple[float, float]]:
     """
-    FIXED: Parse trajectory string with improved regex patterns
+    Parse trajectory string with improved regex patterns
     """
     if not trajectory_str:
         return []
 
     # Clean the string
     trajectory_str = trajectory_str.strip().strip('"\'')
-
-    # Try multiple patterns to match different formats
-    patterns = [
-        r'\[\s*\(([^)]+)\)\s*(?:,\s*\(([^)]+)\))*\s*\]',  # Full bracket notation
-        r'\(([^)]+)\)',  # Individual parentheses
-    ]
-
-    coordinates = []
 
     # Pattern to extract individual coordinate pairs
     coord_pattern = r'\(\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*\)'
@@ -112,6 +98,19 @@ def parse_ground_truth_trajectory(trajectory_str: str) -> List[Tuple[float, floa
         coordinates = [(float(x), float(y)) for x, y in matches]
 
     return coordinates
+
+
+def parse_predicted_trajectory(prediction_dict: Dict) -> Optional[List[Tuple[float, float]]]:
+    """
+    Parse predicted trajectory from the prediction dictionary
+    """
+    if 'trajectory' in prediction_dict and prediction_dict['trajectory']:
+        traj = prediction_dict['trajectory']
+        if isinstance(traj, str):
+            return parse_ground_truth_trajectory(traj)
+        elif isinstance(traj, list):
+            return traj
+    return None
 
 
 def calculate_trajectory_errors(predicted: List[Tuple[float, float]],
@@ -141,12 +140,37 @@ def calculate_trajectory_errors(predicted: List[Tuple[float, float]],
         'lateral_rmse': float(np.sqrt(np.mean(lateral_errors ** 2))),
         'longitudinal_rmse': float(np.sqrt(np.mean(longitudinal_errors ** 2))),
         'lateral_mae': float(np.mean(np.abs(lateral_errors))),
-        'longitudinal_mae': float(np.mean(np.abs(longitudinal_errors)))
+        'longitudinal_mae': float(np.mean(np.abs(longitudinal_errors))),
+        'lateral_errors': lateral_errors.tolist(),
+        'longitudinal_errors': longitudinal_errors.tolist()
     }
 
 
+def interpolate_4_to_20_points(four_points: List[Tuple[float, float]],
+                               time_points_20: List[float]) -> List[Tuple[float, float]]:
+    """
+    Interpolate 4 predicted points to 20 time points for LK comparison
+    Assumes 4 points are at t=[1.0, 2.0, 3.0, 4.0] seconds
+    """
+    if len(four_points) != 4:
+        return []
+
+    # Time points for the 4 predictions
+    time_4 = [1.0, 2.0, 3.0, 4.0]
+
+    # Extract x and y coordinates
+    x_coords = [p[0] for p in four_points]
+    y_coords = [p[1] for p in four_points]
+
+    # Interpolate to 20 time points
+    x_interp = np.interp(time_points_20, time_4, x_coords)
+    y_interp = np.interp(time_points_20, time_4, y_coords)
+
+    return list(zip(x_interp, y_interp))
+
+
 def analyze_sam_results(sam_results_file: str, ground_truth_file: str) -> Dict:
-    """FIXED: Main analysis function with proper handling of all scenarios"""
+    """Main analysis function with temporal error tracking"""
 
     print("Loading SAM results...")
     with open(sam_results_file, 'r') as f:
@@ -172,7 +196,7 @@ def analyze_sam_results(sam_results_file: str, ground_truth_file: str) -> Dict:
         'lane_change_count': 0,
         'sam_reconstruction_count': 0,
         'trajectory_direct_count': 0,
-        'lane_keeping_reconstructed': 0,
+        'lane_keeping_with_4_points': 0,
         'failed_comparisons': []
     }
 
@@ -192,25 +216,25 @@ def analyze_sam_results(sam_results_file: str, ground_truth_file: str) -> Dict:
 
         gt_response = gt_text.split('[/INST]')[1].replace('</s>', '').strip()
 
-        # FIXED: Better trajectory extraction with multiple patterns
+        # Extract ground truth trajectory (20 points)
         gt_trajectory = None
         trajectory_patterns = [
-            r'- Trajectory:\s*"([^"]+)"',  # With dash and quotes
-            r'Trajectory:\s*"([^"]+)"',  # Without dash, with quotes
-            r'- Trajectory:\s*([^\n]+)',  # With dash, no quotes
-            r'Trajectory:\s*([^\n]+)',  # Without dash, no quotes
+            r'- Trajectory:\s*"([^"]+)"',
+            r'Trajectory:\s*"([^"]+)"',
+            r'- Trajectory:\s*([^\n]+)',
+            r'Trajectory:\s*([^\n]+)',
         ]
 
         for pattern in trajectory_patterns:
             match = re.search(pattern, gt_response, re.IGNORECASE)
             if match:
                 gt_trajectory = parse_ground_truth_trajectory(match.group(1))
-                if len(gt_trajectory) == 20:  # Ensure 20 points
+                if len(gt_trajectory) == 20:
                     break
 
         if not gt_trajectory or len(gt_trajectory) != 20:
             stats['failed_comparisons'].append(
-                f"Sample {i}: Could not extract 20-point ground truth trajectory (found {len(gt_trajectory) if gt_trajectory else 0} points)")
+                f"Sample {i}: Could not extract 20-point ground truth trajectory")
             continue
 
         # Get prediction details
@@ -236,14 +260,19 @@ def analyze_sam_results(sam_results_file: str, ground_truth_file: str) -> Dict:
         sam_params = None
         delta_vx = None
 
-        # FIXED: Handle both lane keeping and lane changes
         if pred_intention == 0:  # Lane keeping
             stats['lane_keeping_count'] += 1
 
-            # For lane keeping, reconstruct using constant velocity
-            predicted_points = reconstruct_lane_keeping_trajectory(vx_ms, time_points)
-            prediction_type = "lane_keeping_reconstruction"
-            stats['lane_keeping_reconstructed'] += 1
+            # For LK, use the 4 predicted trajectory points directly
+            pred_4_points = parse_predicted_trajectory(sam_result['prediction'])
+            if pred_4_points and len(pred_4_points) == 4:
+                # Interpolate 4 points to 20 for comparison
+                predicted_points = interpolate_4_to_20_points(pred_4_points, time_points)
+                prediction_type = "lk_4_points_interpolated"
+                stats['lane_keeping_with_4_points'] += 1
+            else:
+                stats['failed_comparisons'].append(f"Sample {i}: LK without 4 trajectory points")
+                continue
 
         else:  # Lane change (intention 1 or 2)
             stats['lane_change_count'] += 1
@@ -260,7 +289,7 @@ def analyze_sam_results(sam_results_file: str, ground_truth_file: str) -> Dict:
 
                 if W is None or D is None or v0 is None or delta_vx is None:
                     stats['failed_comparisons'].append(
-                        f"Sample {i}: Missing SAM parameters - W:{W}, D:{D}, v0:{v0}, Delta_Vx:{delta_vx}")
+                        f"Sample {i}: Missing SAM parameters")
                     continue
 
                 sam_params = pred_parameters
@@ -273,27 +302,14 @@ def analyze_sam_results(sam_results_file: str, ground_truth_file: str) -> Dict:
                 except Exception as e:
                     stats['failed_comparisons'].append(f"Sample {i}: SAM reconstruction failed: {e}")
                     continue
-
-            elif pred_trajectory:
-                # Use direct trajectory prediction
-                stats['trajectory_direct_count'] += 1
-                prediction_type = "trajectory_direct"
-
-                # Assuming pred_trajectory is already a list of tuples
-                if len(pred_trajectory) >= 20:
-                    predicted_points = pred_trajectory[:20]
-                else:
-                    stats['failed_comparisons'].append(
-                        f"Sample {i}: Direct trajectory has insufficient points: {len(pred_trajectory)}")
-                    continue
             else:
-                stats['failed_comparisons'].append(f"Sample {i}: Lane change without SAM parameters or trajectory")
+                stats['failed_comparisons'].append(f"Sample {i}: Lane change without SAM parameters")
                 continue
 
         if predicted_points is None:
             continue
 
-        # Calculate errors
+        # Calculate errors with temporal information
         errors = calculate_trajectory_errors(predicted_points, gt_trajectory)
 
         # Create comparison record
@@ -309,7 +325,9 @@ def analyze_sam_results(sam_results_file: str, ground_truth_file: str) -> Dict:
             ground_truth_points=gt_trajectory,
             sam_parameters=sam_params,
             input_vx_kmh=vx_kmh,
-            delta_vx=delta_vx
+            delta_vx=delta_vx,
+            lateral_errors_by_time=errors['lateral_errors'],
+            longitudinal_errors_by_time=errors['longitudinal_errors']
         )
 
         comparisons.append(comparison)
@@ -327,14 +345,373 @@ def analyze_sam_results(sam_results_file: str, ground_truth_file: str) -> Dict:
     }
 
 
+def analyze_temporal_errors_lc(comparisons: List[TrajectoryComparison],
+                               time_points: List[float]) -> Dict:
+    """
+    Analyze temporal errors for Lane Change samples only
+    """
+    lc_comparisons = [c for c in comparisons if c.intention != 0 and c.prediction_type == "sam_reconstruction"]
+
+    if not lc_comparisons:
+        return {}
+
+    num_time_points = len(time_points)
+
+    # Collect errors at each time point
+    lateral_errors_by_time = [[] for _ in range(num_time_points)]
+    longitudinal_errors_by_time = [[] for _ in range(num_time_points)]
+
+    for comp in lc_comparisons:
+        if comp.lateral_errors_by_time and comp.longitudinal_errors_by_time:
+            for t_idx in range(min(num_time_points, len(comp.lateral_errors_by_time))):
+                lateral_errors_by_time[t_idx].append(comp.lateral_errors_by_time[t_idx])
+                longitudinal_errors_by_time[t_idx].append(comp.longitudinal_errors_by_time[t_idx])
+
+    # Calculate statistics at each time point
+    temporal_stats = {
+        'time_points': time_points,
+        'lateral': {
+            'mean_errors': [],
+            'std_errors': [],
+            'mean_abs_errors': [],
+            'std_abs_errors': []
+        },
+        'longitudinal': {
+            'mean_errors': [],
+            'std_errors': [],
+            'mean_abs_errors': [],
+            'std_abs_errors': []
+        },
+        'sample_count': len(lc_comparisons)
+    }
+
+    for t_idx in range(num_time_points):
+        # Lateral statistics
+        if lateral_errors_by_time[t_idx]:
+            lat_errors = np.array(lateral_errors_by_time[t_idx])
+            temporal_stats['lateral']['mean_errors'].append(np.mean(lat_errors))
+            temporal_stats['lateral']['std_errors'].append(np.std(lat_errors))
+            temporal_stats['lateral']['mean_abs_errors'].append(np.mean(np.abs(lat_errors)))
+            temporal_stats['lateral']['std_abs_errors'].append(np.std(np.abs(lat_errors)))
+        else:
+            temporal_stats['lateral']['mean_errors'].append(0)
+            temporal_stats['lateral']['std_errors'].append(0)
+            temporal_stats['lateral']['mean_abs_errors'].append(0)
+            temporal_stats['lateral']['std_abs_errors'].append(0)
+
+        # Longitudinal statistics
+        if longitudinal_errors_by_time[t_idx]:
+            lon_errors = np.array(longitudinal_errors_by_time[t_idx])
+            temporal_stats['longitudinal']['mean_errors'].append(np.mean(lon_errors))
+            temporal_stats['longitudinal']['std_errors'].append(np.std(lon_errors))
+            temporal_stats['longitudinal']['mean_abs_errors'].append(np.mean(np.abs(lon_errors)))
+            temporal_stats['longitudinal']['std_abs_errors'].append(np.std(np.abs(lon_errors)))
+        else:
+            temporal_stats['longitudinal']['mean_errors'].append(0)
+            temporal_stats['longitudinal']['std_errors'].append(0)
+            temporal_stats['longitudinal']['mean_abs_errors'].append(0)
+            temporal_stats['longitudinal']['std_abs_errors'].append(0)
+
+    return temporal_stats
+
+
+def analyze_lk_4_point_errors(comparisons: List[TrajectoryComparison]) -> Dict:
+    """
+    Analyze errors for Lane Keeping samples at the 4 prediction time points (1s, 2s, 3s, 4s)
+    """
+    lk_comparisons = [c for c in comparisons if c.intention == 0]
+
+    if not lk_comparisons:
+        return {}
+
+    # Time indices for 1s, 2s, 3s, 4s (corresponding to indices 4, 9, 14, 19 in 20-point array)
+    time_indices = [4, 9, 14, 19]  # 0.2*5=1.0, 0.2*10=2.0, 0.2*15=3.0, 0.2*20=4.0
+    time_points = [1.0, 2.0, 3.0, 4.0]
+
+    lk_stats = {
+        'time_points': time_points,
+        'lateral': {
+            'mean_errors': [],
+            'std_errors': [],
+            'mean_abs_errors': [],
+            'std_abs_errors': []
+        },
+        'longitudinal': {
+            'mean_errors': [],
+            'std_errors': [],
+            'mean_abs_errors': [],
+            'std_abs_errors': []
+        },
+        'sample_count': len(lk_comparisons)
+    }
+
+    for t_idx in time_indices:
+        lateral_errors = []
+        longitudinal_errors = []
+
+        for comp in lk_comparisons:
+            if (comp.lateral_errors_by_time and comp.longitudinal_errors_by_time and
+                    len(comp.lateral_errors_by_time) > t_idx):
+                lateral_errors.append(comp.lateral_errors_by_time[t_idx])
+                longitudinal_errors.append(comp.longitudinal_errors_by_time[t_idx])
+
+        if lateral_errors:
+            lat_errors = np.array(lateral_errors)
+            lk_stats['lateral']['mean_errors'].append(np.mean(lat_errors))
+            lk_stats['lateral']['std_errors'].append(np.std(lat_errors))
+            lk_stats['lateral']['mean_abs_errors'].append(np.mean(np.abs(lat_errors)))
+            lk_stats['lateral']['std_abs_errors'].append(np.std(np.abs(lat_errors)))
+        else:
+            lk_stats['lateral']['mean_errors'].append(0)
+            lk_stats['lateral']['std_errors'].append(0)
+            lk_stats['lateral']['mean_abs_errors'].append(0)
+            lk_stats['lateral']['std_abs_errors'].append(0)
+
+        if longitudinal_errors:
+            lon_errors = np.array(longitudinal_errors)
+            lk_stats['longitudinal']['mean_errors'].append(np.mean(lon_errors))
+            lk_stats['longitudinal']['std_errors'].append(np.std(lon_errors))
+            lk_stats['longitudinal']['mean_abs_errors'].append(np.mean(np.abs(lon_errors)))
+            lk_stats['longitudinal']['std_abs_errors'].append(np.std(np.abs(lon_errors)))
+        else:
+            lk_stats['longitudinal']['mean_errors'].append(0)
+            lk_stats['longitudinal']['std_errors'].append(0)
+            lk_stats['longitudinal']['mean_abs_errors'].append(0)
+            lk_stats['longitudinal']['std_abs_errors'].append(0)
+
+    return lk_stats
+
+
+def plot_temporal_errors(temporal_stats: Dict, output_dir: str) -> None:
+    """
+    Plot temporal error analysis for Lane Change samples
+    """
+    if not temporal_stats:
+        print("No temporal statistics to plot!")
+        return
+
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
+
+    time_points = temporal_stats['time_points']
+
+    # Lateral Mean Error vs Time
+    ax1.plot(time_points, temporal_stats['lateral']['mean_errors'], 'b-o', linewidth=2, markersize=4)
+    ax1.fill_between(time_points,
+                     np.array(temporal_stats['lateral']['mean_errors']) - np.array(
+                         temporal_stats['lateral']['std_errors']),
+                     np.array(temporal_stats['lateral']['mean_errors']) + np.array(
+                         temporal_stats['lateral']['std_errors']),
+                     alpha=0.3, color='blue')
+    ax1.set_xlabel('Time (s)')
+    ax1.set_ylabel('Lateral Error (m)')
+    ax1.set_title(f'Lateral Mean Error vs Time\n(Lane Changes, N={temporal_stats["sample_count"]})')
+    ax1.grid(True, alpha=0.3)
+    ax1.axhline(y=0, color='k', linestyle='--', alpha=0.5)
+
+    # Lateral Absolute Error vs Time
+    ax2.plot(time_points, temporal_stats['lateral']['mean_abs_errors'], 'g-o', linewidth=2, markersize=4)
+    ax2.fill_between(time_points,
+                     np.array(temporal_stats['lateral']['mean_abs_errors']) - np.array(
+                         temporal_stats['lateral']['std_abs_errors']),
+                     np.array(temporal_stats['lateral']['mean_abs_errors']) + np.array(
+                         temporal_stats['lateral']['std_abs_errors']),
+                     alpha=0.3, color='green')
+    ax2.set_xlabel('Time (s)')
+    ax2.set_ylabel('Lateral Absolute Error (m)')
+    ax2.set_title(f'Lateral Mean Absolute Error vs Time\n(Lane Changes, N={temporal_stats["sample_count"]})')
+    ax2.grid(True, alpha=0.3)
+
+    # Longitudinal Mean Error vs Time
+    ax3.plot(time_points, temporal_stats['longitudinal']['mean_errors'], 'r-o', linewidth=2, markersize=4)
+    ax3.fill_between(time_points,
+                     np.array(temporal_stats['longitudinal']['mean_errors']) - np.array(
+                         temporal_stats['longitudinal']['std_errors']),
+                     np.array(temporal_stats['longitudinal']['mean_errors']) + np.array(
+                         temporal_stats['longitudinal']['std_errors']),
+                     alpha=0.3, color='red')
+    ax3.set_xlabel('Time (s)')
+    ax3.set_ylabel('Longitudinal Error (m)')
+    ax3.set_title(f'Longitudinal Mean Error vs Time\n(Lane Changes, N={temporal_stats["sample_count"]})')
+    ax3.grid(True, alpha=0.3)
+    ax3.axhline(y=0, color='k', linestyle='--', alpha=0.5)
+
+    # Longitudinal Absolute Error vs Time
+    ax4.plot(time_points, temporal_stats['longitudinal']['mean_abs_errors'], 'm-o', linewidth=2, markersize=4)
+    ax4.fill_between(time_points,
+                     np.array(temporal_stats['longitudinal']['mean_abs_errors']) - np.array(
+                         temporal_stats['longitudinal']['std_abs_errors']),
+                     np.array(temporal_stats['longitudinal']['mean_abs_errors']) + np.array(
+                         temporal_stats['longitudinal']['std_abs_errors']),
+                     alpha=0.3, color='magenta')
+    ax4.set_xlabel('Time (s)')
+    ax4.set_ylabel('Longitudinal Absolute Error (m)')
+    ax4.set_title(f'Longitudinal Mean Absolute Error vs Time\n(Lane Changes, N={temporal_stats["sample_count"]})')
+    ax4.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'temporal_error_analysis_lc.png'), dpi=300, bbox_inches='tight')
+    plt.show()
+
+    print(f"📊 Temporal error analysis plot saved to: {os.path.join(output_dir, 'temporal_error_analysis_lc.png')}")
+
+
+def plot_lk_4_point_errors(lk_stats: Dict, output_dir: str) -> None:
+    """
+    Plot 4-point error analysis for Lane Keeping samples
+    """
+    if not lk_stats:
+        print("No LK statistics to plot!")
+        return
+
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
+
+    time_points = lk_stats['time_points']
+
+    # Lateral Mean Error
+    ax1.bar(time_points, lk_stats['lateral']['mean_errors'],
+            yerr=lk_stats['lateral']['std_errors'], capsize=5, color='blue', alpha=0.7)
+    ax1.set_xlabel('Time (s)')
+    ax1.set_ylabel('Lateral Error (m)')
+    ax1.set_title(f'Lateral Mean Error at 4 Time Points\n(Lane Keeping, N={lk_stats["sample_count"]})')
+    ax1.grid(True, alpha=0.3)
+    ax1.axhline(y=0, color='k', linestyle='--', alpha=0.5)
+
+    # Lateral Absolute Error
+    ax2.bar(time_points, lk_stats['lateral']['mean_abs_errors'],
+            yerr=lk_stats['lateral']['std_abs_errors'], capsize=5, color='green', alpha=0.7)
+    ax2.set_xlabel('Time (s)')
+    ax2.set_ylabel('Lateral Absolute Error (m)')
+    ax2.set_title(f'Lateral Mean Absolute Error at 4 Time Points\n(Lane Keeping, N={lk_stats["sample_count"]})')
+    ax2.grid(True, alpha=0.3)
+
+    # Longitudinal Mean Error
+    ax3.bar(time_points, lk_stats['longitudinal']['mean_errors'],
+            yerr=lk_stats['longitudinal']['std_errors'], capsize=5, color='red', alpha=0.7)
+    ax3.set_xlabel('Time (s)')
+    ax3.set_ylabel('Longitudinal Error (m)')
+    ax3.set_title(f'Longitudinal Mean Error at 4 Time Points\n(Lane Keeping, N={lk_stats["sample_count"]})')
+    ax3.grid(True, alpha=0.3)
+    ax3.axhline(y=0, color='k', linestyle='--', alpha=0.5)
+
+    # Longitudinal Absolute Error
+    ax4.bar(time_points, lk_stats['longitudinal']['mean_abs_errors'],
+            yerr=lk_stats['longitudinal']['std_abs_errors'], capsize=5, color='magenta', alpha=0.7)
+    ax4.set_xlabel('Time (s)')
+    ax4.set_ylabel('Longitudinal Absolute Error (m)')
+    ax4.set_title(f'Longitudinal Mean Absolute Error at 4 Time Points\n(Lane Keeping, N={lk_stats["sample_count"]})')
+    ax4.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'lk_4_point_error_analysis.png'), dpi=300, bbox_inches='tight')
+    plt.show()
+
+    print(f"📊 LK 4-point error analysis plot saved to: {os.path.join(output_dir, 'lk_4_point_error_analysis.png')}")
+
+
+def plot_sample_trajectories(analysis_results: Dict, output_dir: str, num_samples: int = 6) -> None:
+    """
+    Plot sample trajectory comparisons - separate LK and LC samples
+    """
+    comparisons = analysis_results['comparisons']
+    if not comparisons:
+        print("No comparisons to plot!")
+        return
+
+    # Separate LC and LK samples
+    lc_comparisons = [c for c in comparisons if c.intention != 0]
+    lk_comparisons = [c for c in comparisons if c.intention == 0]
+
+    # Plot LC samples (SAM reconstruction)
+    if lc_comparisons:
+        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+        axes = axes.flatten()
+
+        samples_to_plot = lc_comparisons[:6]
+
+        for i, comp in enumerate(samples_to_plot):
+            ax = axes[i]
+
+            # Extract coordinates
+            pred_x = [p[0] for p in comp.predicted_points]
+            pred_y = [p[1] for p in comp.predicted_points]
+            gt_x = [p[0] for p in comp.ground_truth_points]
+            gt_y = [p[1] for p in comp.ground_truth_points]
+
+            # Plot trajectories
+            ax.plot(gt_x, gt_y, 'b-o', label='Ground Truth (20 pts)', markersize=3, linewidth=2)
+            ax.plot(pred_x, pred_y, 'r--s', label='SAM Reconstruction', markersize=3, linewidth=2)
+
+            intention_names = {1: "Left Change", 2: "Right Change"}
+            ax.set_xlabel('Longitudinal (m)')
+            ax.set_ylabel('Lateral (m)')
+            ax.set_title(f'Sample {comp.sample_id}: {intention_names[comp.intention]}\n'
+                         f'Lat RMSE: {comp.lateral_rmse:.2f}m, Lon RMSE: {comp.longitudinal_rmse:.2f}m')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+
+        # Hide unused subplots
+        for i in range(len(samples_to_plot), len(axes)):
+            axes[i].set_visible(False)
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'lc_sam_trajectory_samples.png'), dpi=300, bbox_inches='tight')
+        plt.show()
+        print(f"📊 LC SAM trajectory plots saved to: {os.path.join(output_dir, 'lc_sam_trajectory_samples.png')}")
+
+    # Plot LK samples (4 predicted points vs 20 GT points)
+    if lk_comparisons:
+        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+        axes = axes.flatten()
+
+        samples_to_plot = lk_comparisons[:6]
+
+        for i, comp in enumerate(samples_to_plot):
+            ax = axes[i]
+
+            # GT: 20 points
+            gt_x = [p[0] for p in comp.ground_truth_points]
+            gt_y = [p[1] for p in comp.ground_truth_points]
+
+            # Predicted: interpolated 20 points from 4 original
+            pred_x = [p[0] for p in comp.predicted_points]
+            pred_y = [p[1] for p in comp.predicted_points]
+
+            # Original 4 predicted points (at t=1,2,3,4s, indices 4,9,14,19)
+            orig_indices = [4, 9, 14, 19]
+            orig_pred_x = [pred_x[idx] for idx in orig_indices if idx < len(pred_x)]
+            orig_pred_y = [pred_y[idx] for idx in orig_indices if idx < len(pred_y)]
+
+            # Plot trajectories
+            ax.plot(gt_x, gt_y, 'b-o', label='Ground Truth (20 pts)', markersize=3, linewidth=2)
+            ax.plot(pred_x, pred_y, 'g--', label='Interpolated (4→20 pts)', linewidth=1, alpha=0.7)
+            ax.plot(orig_pred_x, orig_pred_y, 'r^', label='Original 4 Predictions', markersize=8)
+
+            ax.set_xlabel('Longitudinal (m)')
+            ax.set_ylabel('Lateral (m)')
+            ax.set_title(f'Sample {comp.sample_id}: Lane Keeping\n'
+                         f'Lat RMSE: {comp.lateral_rmse:.2f}m, Lon RMSE: {comp.longitudinal_rmse:.2f}m')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+
+        # Hide unused subplots
+        for i in range(len(samples_to_plot), len(axes)):
+            axes[i].set_visible(False)
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'lk_4point_trajectory_samples.png'), dpi=300, bbox_inches='tight')
+        plt.show()
+        print(
+            f"📊 LK 4-point trajectory plots saved to: {os.path.join(output_dir, 'lk_4point_trajectory_samples.png')}")
+
+
 def generate_analysis_report(analysis_results: Dict) -> None:
-    """FIXED: Generate comprehensive analysis report"""
+    """Generate comprehensive analysis report"""
 
     comparisons = analysis_results['comparisons']
     stats = analysis_results['statistics']
 
     print("\n" + "=" * 60)
-    print("FIXED SAM RESULTS ANALYSIS REPORT")
+    print("REVISED SAM RESULTS ANALYSIS REPORT")
     print("=" * 60)
 
     print(f"\n📊 OVERVIEW:")
@@ -344,86 +721,52 @@ def generate_analysis_report(analysis_results: Dict) -> None:
     print(f"Success rate: {stats['successful_comparisons'] / stats['total_samples'] * 100:.1f}%")
 
     print(f"\n🎯 PREDICTION TYPES:")
-    print(f"Lane keeping: {stats['lane_keeping_count']} (reconstructed: {stats['lane_keeping_reconstructed']})")
-    print(f"Lane change: {stats['lane_change_count']}")
-    print(f"SAM reconstructions: {stats['sam_reconstruction_count']}")
-    print(f"Direct trajectories: {stats['trajectory_direct_count']}")
+    print(f"Lane keeping: {stats['lane_keeping_count']} (4-point direct: {stats['lane_keeping_with_4_points']})")
+    print(f"Lane change: {stats['lane_change_count']} (SAM reconstruction: {stats['sam_reconstruction_count']})")
 
     if not comparisons:
         print("\n❌ No successful comparisons to analyze!")
         return
 
-    # Calculate aggregate statistics
-    lateral_rmse_values = [c.lateral_rmse for c in comparisons if c.lateral_rmse != float('inf')]
-    longitudinal_rmse_values = [c.longitudinal_rmse for c in comparisons if c.longitudinal_rmse != float('inf')]
-    lateral_mae_values = [c.lateral_mae for c in comparisons if c.lateral_mae != float('inf')]
-    longitudinal_mae_values = [c.longitudinal_mae for c in comparisons if c.longitudinal_mae != float('inf')]
+    # Separate analysis for LK and LC
+    lk_comparisons = [c for c in comparisons if c.intention == 0]
+    lc_comparisons = [c for c in comparisons if c.intention != 0]
 
-    print(f"\n📈 OVERALL ERROR STATISTICS:")
-    if lateral_rmse_values:
-        print(f"Lateral RMSE: {np.mean(lateral_rmse_values):.3f} ± {np.std(lateral_rmse_values):.3f} m")
-        print(f"Lateral MAE:  {np.mean(lateral_mae_values):.3f} ± {np.std(lateral_mae_values):.3f} m")
+    print(f"\n🔄 LANE KEEPING ANALYSIS ({len(lk_comparisons)} samples):")
+    if lk_comparisons:
+        lk_lat_rmse = [c.lateral_rmse for c in lk_comparisons if c.lateral_rmse != float('inf')]
+        lk_lon_rmse = [c.longitudinal_rmse for c in lk_comparisons if c.longitudinal_rmse != float('inf')]
+        print(f"Lateral RMSE: {np.mean(lk_lat_rmse):.3f} ± {np.std(lk_lat_rmse):.3f} m")
+        print(f"Longitudinal RMSE: {np.mean(lk_lon_rmse):.3f} ± {np.std(lk_lon_rmse):.3f} m")
 
-    if longitudinal_rmse_values:
-        print(f"Longitudinal RMSE: {np.mean(longitudinal_rmse_values):.3f} ± {np.std(longitudinal_rmse_values):.3f} m")
-        print(f"Longitudinal MAE:  {np.mean(longitudinal_mae_values):.3f} ± {np.std(longitudinal_mae_values):.3f} m")
+    print(f"\n🔄 LANE CHANGE ANALYSIS ({len(lc_comparisons)} samples):")
+    if lc_comparisons:
+        lc_lat_rmse = [c.lateral_rmse for c in lc_comparisons if c.lateral_rmse != float('inf')]
+        lc_lon_rmse = [c.longitudinal_rmse for c in lc_comparisons if c.longitudinal_rmse != float('inf')]
+        print(f"Lateral RMSE: {np.mean(lc_lat_rmse):.3f} ± {np.std(lc_lat_rmse):.3f} m")
+        print(f"Longitudinal RMSE: {np.mean(lc_lon_rmse):.3f} ± {np.std(lc_lon_rmse):.3f} m")
 
-    # Intention-based breakdown
-    print(f"\n🔄 BY INTENTION:")
-    for intention in [0, 1, 2]:
-        intention_comparisons = [c for c in comparisons if c.intention == intention]
-        if intention_comparisons:
-            intention_name = {0: "Keep Lane", 1: "Left Change", 2: "Right Change"}[intention]
-            lat_rmse = [c.lateral_rmse for c in intention_comparisons if c.lateral_rmse != float('inf')]
-            lon_rmse = [c.longitudinal_rmse for c in intention_comparisons if c.longitudinal_rmse != float('inf')]
-            lat_mae = [c.lateral_mae for c in intention_comparisons if c.lateral_mae != float('inf')]
-            lon_mae = [c.longitudinal_mae for c in intention_comparisons if c.longitudinal_mae != float('inf')]
-
-            print(f"{intention_name}: {len(intention_comparisons)} samples")
-            if lat_rmse:
-                print(f"  Lateral RMSE: {np.mean(lat_rmse):.3f} ± {np.std(lat_rmse):.3f} m")
-                print(f"  Lateral MAE:  {np.mean(lat_mae):.3f} ± {np.std(lat_mae):.3f} m")
-            if lon_rmse:
-                print(f"  Longitudinal RMSE: {np.mean(lon_rmse):.3f} ± {np.std(lon_rmse):.3f} m")
-                print(f"  Longitudinal MAE:  {np.mean(lon_mae):.3f} ± {np.std(lon_mae):.3f} m")
-
-    # Prediction type breakdown
-    print(f"\n🔧 BY PREDICTION TYPE:")
-    for pred_type in ["lane_keeping_reconstruction", "sam_reconstruction", "trajectory_direct"]:
-        type_comparisons = [c for c in comparisons if c.prediction_type == pred_type]
-        if type_comparisons:
-            lat_rmse = [c.lateral_rmse for c in type_comparisons if c.lateral_rmse != float('inf')]
-            lon_rmse = [c.longitudinal_rmse for c in type_comparisons if c.longitudinal_rmse != float('inf')]
-
-            print(f"{pred_type}: {len(type_comparisons)} samples")
-            if lat_rmse:
-                print(f"  Lateral RMSE: {np.mean(lat_rmse):.3f} ± {np.std(lat_rmse):.3f} m")
-            if lon_rmse:
-                print(f"  Longitudinal RMSE: {np.mean(lon_rmse):.3f} ± {np.std(lon_rmse):.3f} m")
-
-    # Failed comparisons summary
-    if stats['failed_comparisons']:
-        print(f"\n❌ FAILED COMPARISONS ({len(stats['failed_comparisons'])}):")
-        failure_types = {}
-        for failure in stats['failed_comparisons']:
-            # Extract failure type
-            if ':' in failure:
-                failure_type = failure.split(':', 2)[1].strip() if len(failure.split(':', 2)) > 1 else failure
-            else:
-                failure_type = failure
-            failure_types[failure_type] = failure_types.get(failure_type, 0) + 1
-
-        for failure_type, count in sorted(failure_types.items(), key=lambda x: x[1], reverse=True):
-            print(f"  {failure_type}: {count}")
+        # Breakdown by intention
+        for intention in [1, 2]:
+            intention_comps = [c for c in lc_comparisons if c.intention == intention]
+            if intention_comps:
+                intention_name = {1: "Left Change", 2: "Right Change"}[intention]
+                lat_rmse = [c.lateral_rmse for c in intention_comps if c.lateral_rmse != float('inf')]
+                lon_rmse = [c.longitudinal_rmse for c in intention_comps if c.longitudinal_rmse != float('inf')]
+                print(f"  {intention_name}: {len(intention_comps)} samples")
+                if lat_rmse:
+                    print(f"    Lateral RMSE: {np.mean(lat_rmse):.3f} ± {np.std(lat_rmse):.3f} m")
+                if lon_rmse:
+                    print(f"    Longitudinal RMSE: {np.mean(lon_rmse):.3f} ± {np.std(lon_rmse):.3f} m")
 
 
-def save_detailed_results(analysis_results: Dict, output_file: str) -> None:
-    """Save detailed results to JSON file"""
+def save_detailed_results(analysis_results: Dict, temporal_stats: Dict, lk_stats: Dict, output_dir: str) -> None:
+    """Save all detailed results to JSON files"""
 
-    # Convert comparisons to serializable format
+    # Main results
     serializable_results = {
         'metadata': {
-            'analysis_type': 'FIXED_SAM_vs_GroundTruth_20Points',
+            'analysis_type': 'REVISED_SAM_vs_GroundTruth_Temporal',
             'total_samples': analysis_results['statistics']['total_samples'],
             'successful_comparisons': analysis_results['statistics']['successful_comparisons'],
             'time_points': analysis_results['time_points']
@@ -443,6 +786,10 @@ def save_detailed_results(analysis_results: Dict, output_file: str) -> None:
                 'lateral_mae': comp.lateral_mae,
                 'longitudinal_mae': comp.longitudinal_mae
             },
+            'temporal_errors': {
+                'lateral_errors_by_time': comp.lateral_errors_by_time,
+                'longitudinal_errors_by_time': comp.longitudinal_errors_by_time
+            },
             'predicted_points': comp.predicted_points,
             'ground_truth_points': comp.ground_truth_points,
             'sam_parameters': comp.sam_parameters,
@@ -451,103 +798,74 @@ def save_detailed_results(analysis_results: Dict, output_file: str) -> None:
         }
         serializable_results['comparisons'].append(comp_dict)
 
-    with open(output_file, 'w') as f:
+    # Save main results
+    with open(os.path.join(output_dir, 'detailed_results.json'), 'w') as f:
         json.dump(serializable_results, f, indent=2)
 
-    print(f"\n💾 Detailed results saved to: {output_file}")
+    # Save temporal statistics
+    if temporal_stats:
+        with open(os.path.join(output_dir, 'temporal_stats_lc.json'), 'w') as f:
+            json.dump(temporal_stats, f, indent=2)
 
+    # Save LK statistics
+    if lk_stats:
+        with open(os.path.join(output_dir, 'lk_4point_stats.json'), 'w') as f:
+            json.dump(lk_stats, f, indent=2)
 
-def plot_sample_trajectories(analysis_results: Dict, num_samples: int = 6) -> None:
-    """Plot sample trajectory comparisons for different categories"""
-
-    comparisons = analysis_results['comparisons']
-    if not comparisons:
-        print("No comparisons to plot!")
-        return
-
-    # Select samples from different categories
-    lane_keeping = [c for c in comparisons if c.intention == 0]
-    left_change = [c for c in comparisons if c.intention == 1]
-    right_change = [c for c in comparisons if c.intention == 2]
-
-    samples_to_plot = []
-
-    # Get 2 from each category if available
-    if lane_keeping:
-        samples_to_plot.extend(lane_keeping[:2])
-    if left_change:
-        samples_to_plot.extend(left_change[:2])
-    if right_change:
-        samples_to_plot.extend(right_change[:2])
-
-    # Fill up to num_samples if we don't have enough
-    if len(samples_to_plot) < num_samples:
-        remaining = [c for c in comparisons if c not in samples_to_plot]
-        samples_to_plot.extend(remaining[:num_samples - len(samples_to_plot)])
-
-    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
-    axes = axes.flatten()
-
-    for i, comp in enumerate(samples_to_plot[:6]):
-        ax = axes[i]
-
-        # Extract coordinates
-        pred_x = [p[0] for p in comp.predicted_points]
-        pred_y = [p[1] for p in comp.predicted_points]
-        gt_x = [p[0] for p in comp.ground_truth_points]
-        gt_y = [p[1] for p in comp.ground_truth_points]
-
-        # Plot trajectories
-        ax.plot(gt_x, gt_y, 'b-o', label='Ground Truth', markersize=3, linewidth=2)
-        ax.plot(pred_x, pred_y, 'r--s', label=f'{comp.prediction_type}', markersize=3, linewidth=2)
-
-        intention_names = {0: "Keep Lane", 1: "Left Change", 2: "Right Change"}
-        ax.set_xlabel('Longitudinal (m)')
-        ax.set_ylabel('Lateral (m)')
-        ax.set_title(f'Sample {comp.sample_id}: {intention_names[comp.intention]}\n'
-                     f'Lat RMSE: {comp.lateral_rmse:.2f}m, Lon RMSE: {comp.longitudinal_rmse:.2f}m\n'
-                     f'Type: {comp.prediction_type}')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-
-    # Hide unused subplots
-    for i in range(len(samples_to_plot), len(axes)):
-        axes[i].set_visible(False)
-
-    plt.tight_layout()
-    plt.savefig('fixed_sam_trajectory_comparison_samples.png', dpi=300, bbox_inches='tight')
-    plt.show()
-
-    print(f"📊 Sample trajectory plots saved to: fixed_sam_trajectory_comparison_samples.png")
+    print(f"\n💾 All results saved to: {output_dir}/")
 
 
 def main():
     """Main analysis execution"""
 
+    # Create output directory
+    output_dir = "sam_analysis_results"
+    os.makedirs(output_dir, exist_ok=True)
+    print(f"📁 Created output directory: {output_dir}/")
+
     # File paths
     sam_results_file = "complete_pal_predictions.json"
     ground_truth_file = "../lcllm_testing_data_20points.json"
 
-    print("Starting FIXED SAM Results Analysis...")
+    print("Starting REVISED SAM Results Analysis...")
     print(f"SAM results file: {sam_results_file}")
     print(f"Ground truth file: {ground_truth_file}")
 
     try:
-        # Run analysis
+        # Run main analysis
         analysis_results = analyze_sam_results(sam_results_file, ground_truth_file)
 
         # Generate report
         generate_analysis_report(analysis_results)
 
-        # Save detailed results
-        save_detailed_results(analysis_results, "fixed_sam_analysis_detailed_results.json")
+        # Temporal analysis for LC samples
+        print("\n🔄 Analyzing temporal errors for Lane Changes...")
+        temporal_stats = analyze_temporal_errors_lc(analysis_results['comparisons'],
+                                                    analysis_results['time_points'])
 
-        # Plot sample comparisons
-        plot_sample_trajectories(analysis_results, num_samples=6)
+        # 4-point analysis for LK samples
+        print("\n🔄 Analyzing 4-point errors for Lane Keeping...")
+        lk_stats = analyze_lk_4_point_errors(analysis_results['comparisons'])
 
-        print(f"\n🎉 FIXED Analysis complete!")
-        print(f"📁 Detailed results: fixed_sam_analysis_detailed_results.json")
-        print(f"📊 Sample plots: fixed_sam_trajectory_comparison_samples.png")
+        # Save all results
+        save_detailed_results(analysis_results, temporal_stats, lk_stats, output_dir)
+
+        # Generate plots
+        plot_sample_trajectories(analysis_results, output_dir, num_samples=6)
+
+        if temporal_stats:
+            plot_temporal_errors(temporal_stats, output_dir)
+
+        if lk_stats:
+            plot_lk_4_point_errors(lk_stats, output_dir)
+
+        print(f"\n🎉 REVISED Analysis complete!")
+        print(f"📁 All outputs saved to: {output_dir}/")
+        print("📊 Generated plots:")
+        print("  - lc_sam_trajectory_samples.png (Lane Change SAM reconstructions)")
+        print("  - lk_4point_trajectory_samples.png (Lane Keeping 4-point comparisons)")
+        print("  - temporal_error_analysis_lc.png (Lane Change temporal errors)")
+        print("  - lk_4_point_error_analysis.png (Lane Keeping 4-point errors)")
 
     except FileNotFoundError as e:
         print(f"❌ Error: {e}")
